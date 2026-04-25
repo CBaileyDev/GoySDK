@@ -84,18 +84,22 @@ static ImFont* g_FontMono = nullptr;
 static bool g_FontsLoaded = false;
 
 static constexpr float kPageGutter = 16.0f;
-static constexpr float kColumnGap = 12.0f;
-static constexpr float kPanelPadding = 14.0f;
-static constexpr float kHeaderBodyGap = 10.0f;
-static constexpr float kRowMinHeight = 40.0f;
+static constexpr float kColumnGap = 14.0f;
+static constexpr float kPanelPadding = 16.0f;
+static constexpr float kHeaderBodyGap = 12.0f;
+static constexpr float kRowMinHeight = 44.0f;
 static constexpr float kRowSpacing = 8.0f;
 static constexpr float kSeparatorGap = 8.0f;
-static constexpr float kSidebarWidth = 180.0f;
+static constexpr float kSidebarWidth = 220.0f;
 static constexpr float kSidebarItemWidth = kSidebarWidth - 16.0f;
 static constexpr float kToggleW = 36.0f;
 static constexpr float kToggleH = 20.0f;
-static constexpr float kSliderW = 160.0f;
+static constexpr float kSliderW = 200.0f;
+static constexpr float kTopbarH  = 52.0f;
+static constexpr float kBottomBarH = 36.0f;
 static constexpr float kConsoleToolbarH = 40.0f;
+static constexpr float kWindowW = 1120.0f;
+static constexpr float kWindowH = 720.0f;
 
 
 GUIComponent::GUIComponent() : Component("UserInterface", "Displays an interface") { OnCreate(); }
@@ -207,53 +211,63 @@ LRESULT __stdcall GUIComponent::WndProc(const HWND hWnd, UINT uMsg, WPARAM wPara
 }
 
 
-// ─── Dark overlay UI (~#121212, red accent) ──
+// ─── Dark overlay UI ──
+// Palette aligned with the Claude Design "GoySDK Internal" handoff:
+// deeper bases, brighter per-page accents, and dim/glow variants for
+// pill backgrounds and toggle aura.
 namespace Theme {
-    static const ImVec4 Base        = ImVec4(0.039f, 0.039f, 0.043f, 1.00f);
-    static const ImVec4 Surface     = ImVec4(0.067f, 0.067f, 0.075f, 1.00f);
-    static const ImVec4 Elevated    = ImVec4(0.094f, 0.094f, 0.106f, 1.00f);
-    static const ImVec4 Hover       = ImVec4(0.122f, 0.122f, 0.137f, 1.00f);
+    static const ImVec4 Page        = ImVec4(0.027f, 0.027f, 0.039f, 1.00f); // #07070a
+    static const ImVec4 Base        = ImVec4(0.043f, 0.043f, 0.063f, 1.00f); // #0b0b10
+    static const ImVec4 Surface     = ImVec4(0.063f, 0.063f, 0.086f, 1.00f); // #101016
+    static const ImVec4 Elevated    = ImVec4(0.086f, 0.086f, 0.118f, 1.00f); // #16161e
+    static const ImVec4 Hover       = ImVec4(0.114f, 0.114f, 0.153f, 1.00f); // #1d1d27
+    static const ImVec4 Input       = ImVec4(0.051f, 0.051f, 0.071f, 1.00f); // #0d0d12
 
     static const ImVec4 Border       = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
-    static const ImVec4 BorderSubtle = ImVec4(1.00f, 1.00f, 1.00f, 0.03f);
+    static const ImVec4 BorderStrong = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
+    static const ImVec4 BorderSubtle = ImVec4(1.00f, 1.00f, 1.00f, 0.035f);
 
-    static const ImVec4 Text        = ImVec4(0.878f, 0.878f, 0.894f, 1.00f);
-    static const ImVec4 TextDim     = ImVec4(0.541f, 0.541f, 0.573f, 1.00f);
-    static const ImVec4 TextMuted   = ImVec4(0.333f, 0.333f, 0.361f, 1.00f);
+    static const ImVec4 Text        = ImVec4(0.902f, 0.902f, 0.925f, 1.00f); // #e6e6ec
+    static const ImVec4 TextDim     = ImVec4(0.541f, 0.541f, 0.592f, 1.00f); // #8a8a97
+    static const ImVec4 TextMuted   = ImVec4(0.329f, 0.329f, 0.373f, 1.00f); // #54545f
 
-    static const ImVec4 Green       = ImVec4(0.133f, 0.773f, 0.369f, 1.00f);
-    static const ImVec4 GreenDim    = ImVec4(0.133f, 0.773f, 0.369f, 0.12f);
-    static const ImVec4 Amber       = ImVec4(0.961f, 0.620f, 0.043f, 1.00f);
-    static const ImVec4 AmberDim    = ImVec4(0.961f, 0.620f, 0.043f, 0.12f);
-    static const ImVec4 Red         = ImVec4(0.937f, 0.267f, 0.267f, 1.00f);
-    static const ImVec4 RedDim      = ImVec4(0.937f, 0.267f, 0.267f, 0.12f);
-    static const ImVec4 Blue        = ImVec4(0.231f, 0.510f, 0.965f, 1.00f);
-    static const ImVec4 BlueDim     = ImVec4(0.231f, 0.510f, 0.965f, 0.12f);
-    static const ImVec4 Purple      = ImVec4(0.659f, 0.333f, 0.969f, 1.00f);
-    static const ImVec4 PurpleDim   = ImVec4(0.659f, 0.333f, 0.969f, 0.12f);
-    static const ImVec4 Cyan        = ImVec4(0.024f, 0.714f, 0.831f, 1.00f);
-    static const ImVec4 CyanDim     = ImVec4(0.024f, 0.714f, 0.831f, 0.12f);
+    static const ImVec4 Green       = ImVec4(0.133f, 0.773f, 0.369f, 1.00f); // #22c55e
+    static const ImVec4 GreenDim    = ImVec4(0.133f, 0.773f, 0.369f, 0.14f);
+    static const ImVec4 GreenGlow   = ImVec4(0.133f, 0.773f, 0.369f, 0.35f);
+    static const ImVec4 Amber       = ImVec4(0.961f, 0.620f, 0.043f, 1.00f); // #f59e0b
+    static const ImVec4 AmberDim    = ImVec4(0.961f, 0.620f, 0.043f, 0.14f);
+    static const ImVec4 AmberGlow   = ImVec4(0.961f, 0.620f, 0.043f, 0.35f);
+    static const ImVec4 Red         = ImVec4(0.937f, 0.267f, 0.267f, 1.00f); // #ef4444
+    static const ImVec4 RedDim      = ImVec4(0.937f, 0.267f, 0.267f, 0.14f);
+    static const ImVec4 Blue        = ImVec4(0.231f, 0.510f, 0.965f, 1.00f); // #3b82f6
+    static const ImVec4 BlueDim     = ImVec4(0.231f, 0.510f, 0.965f, 0.14f);
+    static const ImVec4 BlueGlow    = ImVec4(0.231f, 0.510f, 0.965f, 0.35f);
+    static const ImVec4 Purple      = ImVec4(0.659f, 0.333f, 0.969f, 1.00f); // #a855f7
+    static const ImVec4 PurpleDim   = ImVec4(0.659f, 0.333f, 0.969f, 0.14f);
+    static const ImVec4 PurpleGlow  = ImVec4(0.659f, 0.333f, 0.969f, 0.35f);
+    static const ImVec4 Cyan        = ImVec4(0.024f, 0.714f, 0.831f, 1.00f); // #06b6d4
+    static const ImVec4 CyanDim     = ImVec4(0.024f, 0.714f, 0.831f, 0.14f);
+    static const ImVec4 CyanGlow    = ImVec4(0.024f, 0.714f, 0.831f, 0.35f);
 
-    static const ImVec4 ConsoleBg   = ImVec4(0.020f, 0.020f, 0.027f, 1.00f);
-    static const ImVec4 SliderTrack  = ImVec4(0.165f, 0.165f, 0.188f, 1.00f);
-
+    static const ImVec4 ConsoleBg   = ImVec4(0.020f, 0.020f, 0.027f, 1.00f); // #050507
+    static const ImVec4 SliderTrack = ImVec4(0.082f, 0.082f, 0.114f, 1.00f); // #15151d
 }
 
 static void ApplyTheme()
 {
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowPadding     = ImVec2(0, 0);
-    s.WindowRounding    = 12.0f;
+    s.WindowRounding    = 16.0f;
     s.WindowBorderSize  = 1.0f;
     s.ChildRounding     = 8.0f;
     s.ChildBorderSize   = 0.0f;
     s.FramePadding      = ImVec2(10, 6);
-    s.FrameRounding     = 6.0f;
+    s.FrameRounding     = 5.0f;
     s.FrameBorderSize   = 0.0f;
     s.ItemSpacing       = ImVec2(8, 8);
     s.ItemInnerSpacing  = ImVec2(6, 4);
-    s.GrabMinSize       = 12.0f;
-    s.GrabRounding      = 6.0f;
+    s.GrabMinSize       = 14.0f;
+    s.GrabRounding      = 7.0f;
     s.ScrollbarRounding = 3.0f;
     s.ScrollbarSize     = 6.0f;
     s.PopupRounding     = 8.0f;
@@ -298,6 +312,44 @@ static void ApplyTheme()
 }
 
 
+// ────────────────────────────────────────────────────────────────────
+// Hex Coin logo — implements the "02 — Hex Coin" mark from the design
+// handoff (claude.ai/design KWzMJ_BUimDtZpKMYnFmtw).
+// Six-vertex hexagon (top-up), accent rim + inset rim + embossed "$".
+// Drawn via the window draw-list at the requested center/size.
+// ────────────────────────────────────────────────────────────────────
+static void DrawHexCoin(ImDrawList* dl, ImVec2 center, float size, const ImVec4& accent)
+{
+    const float r = size * 0.5f;
+    ImVec2 outerPts[6];
+    ImVec2 innerPts[6];
+    const float innerScale = 0.86f;
+    for (int i = 0; i < 6; ++i) {
+        const float a = (3.14159265f / 3.0f) * static_cast<float>(i) - 3.14159265f * 0.5f;
+        outerPts[i] = ImVec2(center.x + r * cosf(a),               center.y + r * sinf(a));
+        innerPts[i] = ImVec2(center.x + r * innerScale * cosf(a),  center.y + r * innerScale * sinf(a));
+    }
+    const ImU32 face = ImGui::ColorConvertFloat4ToU32(ImVec4(0.039f, 0.039f, 0.051f, 1.0f));
+    const ImU32 rim  = ImGui::ColorConvertFloat4ToU32(accent);
+    const ImU32 dim  = ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.25f));
+
+    dl->AddConvexPolyFilled(outerPts, 6, face);
+    dl->AddPolyline(outerPts, 6, rim, ImDrawFlags_Closed, std::max(1.0f, size * 0.025f));
+    dl->AddPolyline(innerPts, 6, dim, ImDrawFlags_Closed, std::max(1.0f, size * 0.06f));
+
+    // Embossed "$". font size scales with mark size; we stick with the
+    // current font so the glyph blends with the rest of the UI.
+    const char* dollar = "$";
+    const float charScale = size / 96.0f;
+    ImFont* font = ImGui::GetFont();
+    const float baseSize = ImGui::GetFontSize();
+    const float drawSize = std::max(8.0f, baseSize * (1.6f + 0.6f * charScale));
+    ImVec2 ts = font->CalcTextSizeA(drawSize, FLT_MAX, 0.0f, dollar);
+    dl->AddText(font, drawSize,
+                ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.55f),
+                rim, dollar);
+}
+
 static bool ToggleSwitch(const char* str_id, bool* v, const ImVec4& accent = Theme::Green)
 {
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -312,17 +364,32 @@ static bool ToggleSwitch(const char* str_id, bool* v, const ImVec4& accent = The
         changed = true;
     }
 
+    // Soft accent glow when on (matches design's box-shadow on .switch.on).
+    if (*v) {
+        for (int i = 3; i >= 1; --i) {
+            const float spread = static_cast<float>(i) * 2.0f;
+            ImU32 glow = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(accent.x, accent.y, accent.z, 0.10f / static_cast<float>(i)));
+            dl->AddRectFilled(ImVec2(p.x - spread, p.y - spread),
+                              ImVec2(p.x + kToggleW + spread, p.y + kToggleH + spread),
+                              glow, radius + spread);
+        }
+    }
+
     ImVec4 track = *v ? accent : Theme::SliderTrack;
-    if (hovered && !*v)
-        track = Theme::Hover;
+    if (hovered && !*v) track = Theme::Hover;
     dl->AddRectFilled(p, ImVec2(p.x + kToggleW, p.y + kToggleH),
                       ImGui::ColorConvertFloat4ToU32(track), radius);
+    if (!*v) {
+        dl->AddRect(p, ImVec2(p.x + kToggleW, p.y + kToggleH),
+                    ImGui::ColorConvertFloat4ToU32(Theme::BorderSubtle), radius, 0, 1.0f);
+    }
 
     const float knobR = radius - 3.0f;
     const float knobX = p.x + radius + (*v ? 1.0f : 0.0f) * (kToggleW - kToggleH);
     const ImVec2 center(knobX, p.y + radius);
     dl->AddCircleFilled(ImVec2(center.x + 0.5f, center.y + 0.5f), knobR + 0.5f, IM_COL32(0, 0, 0, 80));
-    dl->AddCircleFilled(center, knobR, IM_COL32(255, 255, 255, 255));
+    dl->AddCircleFilled(center, knobR, IM_COL32(243, 243, 247, 255));
     return changed;
 }
 
@@ -425,9 +492,19 @@ static void PanelHeader(const char* title, const ImVec4& accent, const char* bad
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
+    // Glowing accent bar (3×14) with a soft halo to match the design's
+    // .accent-bar box-shadow.
+    for (int i = 3; i >= 1; --i) {
+        const float spread = static_cast<float>(i) * 1.5f;
+        ImU32 glow = ImGui::ColorConvertFloat4ToU32(
+            ImVec4(accent.x, accent.y, accent.z, 0.18f / static_cast<float>(i)));
+        dl->AddRectFilled(ImVec2(p.x - spread, p.y - spread),
+                          ImVec2(p.x + 3.0f + spread, p.y + 14.0f + spread),
+                          glow, 2.0f);
+    }
     dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x + 3.0f, p.y + 14.0f),
                       ImGui::ColorConvertFloat4ToU32(accent), 2.0f);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
     if (g_FontBold) ImGui::PushFont(g_FontBold);
     ImGui::TextColored(Theme::Text, "%s", title);
     if (g_FontBold) ImGui::PopFont();
@@ -535,79 +612,222 @@ static void DrawSimpleRowHeader(const char* title, const char* helper = nullptr)
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Tiny SVG-style nav glyphs drawn through ImDrawList. One per page so
+// the sidebar matches the design's icon-bearing nav rows. 14×14 logical
+// box centered on the supplied origin; stroke colour is from the
+// active/inactive accent.
+// ────────────────────────────────────────────────────────────────────
+static void DrawNavIcon(ImDrawList* dl, ImVec2 o, int kind, ImU32 col, float thick = 1.6f)
+{
+    auto P = [&](float x, float y) { return ImVec2(o.x + x, o.y + y); };
+    switch (kind) {
+        case 0: { // Controls — sun/gear: dot + radial spokes
+            dl->AddCircle(P(7, 7), 3.0f, col, 0, thick);
+            dl->AddLine(P(7, 1), P(7, 3), col, thick);   dl->AddLine(P(7, 11), P(7, 13), col, thick);
+            dl->AddLine(P(1, 7), P(3, 7), col, thick);   dl->AddLine(P(11, 7), P(13, 7), col, thick);
+            dl->AddLine(P(2.5f, 2.5f), P(4.0f, 4.0f), col, thick);
+            dl->AddLine(P(10.0f, 10.0f), P(11.5f, 11.5f), col, thick);
+            dl->AddLine(P(2.5f, 11.5f), P(4.0f, 10.0f), col, thick);
+            dl->AddLine(P(10.0f, 4.0f), P(11.5f, 2.5f), col, thick);
+            break;
+        }
+        case 1: { // Tuning — three rising bars (sliders)
+            dl->AddLine(P(2.5f, 13), P(2.5f, 8.5f), col, thick);
+            dl->AddLine(P(7,    13), P(7,    5.5f), col, thick);
+            dl->AddLine(P(11.5f, 13), P(11.5f, 2.5f), col, thick);
+            dl->AddCircleFilled(P(2.5f, 8.5f), 1.6f, col);
+            dl->AddCircleFilled(P(7, 5.5f), 1.6f, col);
+            dl->AddCircleFilled(P(11.5f, 2.5f), 1.6f, col);
+            break;
+        }
+        case 2: { // Overlays — 4-pane grid
+            dl->AddRect(P(1.5f, 1.5f), P(6.5f, 6.5f), col, 1.0f, 0, thick);
+            dl->AddRect(P(7.5f, 1.5f), P(12.5f, 6.5f), col, 1.0f, 0, thick);
+            dl->AddRect(P(1.5f, 7.5f), P(6.5f, 12.5f), col, 1.0f, 0, thick);
+            dl->AddRect(P(7.5f, 7.5f), P(12.5f, 12.5f), col, 1.0f, 0, thick);
+            break;
+        }
+        case 3: { // Automation — circle + crosshair spokes (gear-like)
+            dl->AddCircle(P(7, 7), 2.6f, col, 0, thick);
+            dl->AddLine(P(7, 1), P(7, 3),  col, thick);  dl->AddLine(P(7, 11), P(7, 13), col, thick);
+            dl->AddLine(P(1, 7), P(3, 7),  col, thick);  dl->AddLine(P(11, 7), P(13, 7), col, thick);
+            dl->AddLine(P(2.5f, 2.5f), P(4.0f, 4.0f), col, thick);
+            dl->AddLine(P(10.0f, 10.0f), P(11.5f, 11.5f), col, thick);
+            break;
+        }
+        case 4: { // Console — terminal chevron + underline
+            dl->AddLine(P(2, 4),  P(5, 7),  col, thick);
+            dl->AddLine(P(5, 7),  P(2, 10), col, thick);
+            dl->AddLine(P(7, 11), P(13, 11), col, thick);
+            break;
+        }
+    }
+}
+
 static void DrawSidebar()
 {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Surface);
+    // Slight vertical gradient on the sidebar to match the design's
+    // linear-gradient(180deg, #0d0d13, #08080d).
+    ImVec2 sbPos = ImGui::GetCursorScreenPos();
+    ImVec2 sbMax = ImVec2(sbPos.x + kSidebarWidth, sbPos.y + ImGui::GetContentRegionAvail().y);
+    ImDrawList* outer = ImGui::GetWindowDrawList();
+    const ImU32 sbTop = ImGui::ColorConvertFloat4ToU32(ImVec4(0.051f, 0.051f, 0.075f, 1.0f));
+    const ImU32 sbBot = ImGui::ColorConvertFloat4ToU32(ImVec4(0.031f, 0.031f, 0.051f, 1.0f));
+    outer->AddRectFilledMultiColor(sbPos, sbMax, sbTop, sbTop, sbBot, sbBot);
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
     ImGui::BeginChild("##Sidebar", ImVec2(kSidebarWidth, -1), false, ImGuiWindowFlags_NoScrollbar);
-
-    ImGui::SetCursorPos(ImVec2(kPanelPadding, kPanelPadding));
-    if (g_FontBold) ImGui::PushFont(g_FontBold);
-    ImGui::TextColored(Theme::Text, "GoySDK");
-    if (g_FontBold) ImGui::PopFont();
-    ImGui::SetCursorPosX(kPanelPadding);
-    ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextMuted);
-    ImGui::SetWindowFontScale(0.72f);
-    ImGui::Text("DASHBOARD");
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::PopStyleColor();
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4);
-
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 sp = ImGui::GetCursorScreenPos();
-    dl->AddLine(sp, ImVec2(sp.x + kSidebarWidth, sp.y), ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
-    ImGui::Dummy(ImVec2(0, kSeparatorGap));
 
-    struct NavEntry { const char* label; int pageIdx; ImVec4 dotColor; };
+    // ── Brand row: hex coin + name + sub ──
+    ImGui::SetCursorPos(ImVec2(kPanelPadding, kPanelPadding));
+    ImVec2 brand = ImGui::GetCursorScreenPos();
+    DrawHexCoin(dl, ImVec2(brand.x + 14.0f, brand.y + 14.0f), 28.0f, Theme::Amber);
+    if (g_FontBold) ImGui::PushFont(g_FontBold);
+    dl->AddText(ImVec2(brand.x + 38.0f, brand.y + 1.0f),
+                ImGui::ColorConvertFloat4ToU32(Theme::Text), "GoySDK");
+    if (g_FontBold) ImGui::PopFont();
+    dl->AddText(ImVec2(brand.x + 38.0f, brand.y + 18.0f),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), "INTERNAL · v0.9");
+    ImGui::Dummy(ImVec2(0, 36.0f));
+
+    // ── Nav rows ──
+    struct NavEntry { const char* label; int pageIdx; ImVec4 accent; int icon; const char* kbd; };
     auto DrawNavItem = [&](const NavEntry& e) {
         const bool sel = (g_SelectedPage == e.pageIdx);
-        ImGui::SetCursorPosX(8);
+        ImGui::SetCursorPosX(8.0f);
         ImVec2 p0 = ImGui::GetCursorScreenPos();
-        if (ImGui::InvisibleButton(e.label, ImVec2(kSidebarItemWidth, 26))) g_SelectedPage = e.pageIdx;
+        const float h = 30.0f;
+        if (ImGui::InvisibleButton(e.label, ImVec2(kSidebarItemWidth, h))) g_SelectedPage = e.pageIdx;
         const bool hov = ImGui::IsItemHovered();
-        if (sel)
-            dl->AddRectFilled(p0, ImVec2(p0.x + kSidebarItemWidth, p0.y + 26),
-                              ImGui::ColorConvertFloat4ToU32(Theme::Elevated), 6.0f);
-        else if (hov)
-            dl->AddRectFilled(p0, ImVec2(p0.x + kSidebarItemWidth, p0.y + 26),
-                              ImGui::ColorConvertFloat4ToU32(Theme::Hover), 6.0f);
+        if (sel) {
+            dl->AddRectFilled(p0, ImVec2(p0.x + kSidebarItemWidth, p0.y + h),
+                              ImGui::ColorConvertFloat4ToU32(Theme::Elevated), 7.0f);
+            dl->AddRect(p0, ImVec2(p0.x + kSidebarItemWidth, p0.y + h),
+                        ImGui::ColorConvertFloat4ToU32(Theme::Border), 7.0f, 0, 1.0f);
+        } else if (hov) {
+            dl->AddRectFilled(p0, ImVec2(p0.x + kSidebarItemWidth, p0.y + h),
+                              ImGui::ColorConvertFloat4ToU32(Theme::Elevated), 7.0f);
+        }
+        const ImU32 iconCol = ImGui::ColorConvertFloat4ToU32(
+            sel ? e.accent : Theme::TextMuted);
+        DrawNavIcon(dl, ImVec2(p0.x + 11.0f, p0.y + (h - 14.0f) * 0.5f), e.icon, iconCol);
 
-        dl->AddCircleFilled(ImVec2(p0.x + 14, p0.y + 13), 3.0f,
-                            ImGui::ColorConvertFloat4ToU32(e.dotColor));
         ImVec4 tc = sel ? Theme::Text : (hov ? Theme::Text : Theme::TextDim);
         ImVec2 ts = ImGui::CalcTextSize(e.label);
-        dl->AddText(ImVec2(p0.x + 26, p0.y + (26 - ts.y) * 0.5f),
+        dl->AddText(ImVec2(p0.x + 33.0f, p0.y + (h - ts.y) * 0.5f),
                     ImGui::ColorConvertFloat4ToU32(tc), e.label);
+
+        // KBD hint pill on the right
+        if (e.kbd && e.kbd[0]) {
+            ImVec2 ks = ImGui::CalcTextSize(e.kbd);
+            float kbdX = p0.x + kSidebarItemWidth - ks.x - 14.0f;
+            float kbdY = p0.y + (h - ks.y) * 0.5f;
+            dl->AddRectFilled(ImVec2(kbdX - 4.0f, kbdY - 1.0f),
+                              ImVec2(kbdX + ks.x + 4.0f, kbdY + ks.y + 1.0f),
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.03f)), 3.0f);
+            dl->AddRect(ImVec2(kbdX - 4.0f, kbdY - 1.0f),
+                        ImVec2(kbdX + ks.x + 4.0f, kbdY + ks.y + 1.0f),
+                        ImGui::ColorConvertFloat4ToU32(Theme::BorderSubtle), 3.0f, 0, 1.0f);
+            dl->AddText(ImVec2(kbdX, kbdY),
+                        ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), e.kbd);
+        }
     };
 
     auto DrawGroupLabel = [&](const char* text) {
-        ImGui::SetCursorPos(ImVec2(kPanelPadding, ImGui::GetCursorPosY() + kSeparatorGap));
+        ImGui::SetCursorPos(ImVec2(kPanelPadding, ImGui::GetCursorPosY() + 14.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextMuted);
         ImGui::SetWindowFontScale(0.72f);
         ImGui::Text("%s", text);
         ImGui::SetWindowFontScale(1.0f);
         ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::Dummy(ImVec2(0, 4));
     };
 
     DrawGroupLabel("CONTROL");
-    DrawNavItem({"Controls", 0, Theme::Green});
-    DrawNavItem({"Tuning", 1, Theme::Amber});
+    DrawNavItem({"Controls",   0, Theme::Green,  0, "1"});
+    DrawNavItem({"Tuning",     1, Theme::Amber,  1, "2"});
 
     DrawGroupLabel("CONFIGURE");
-    DrawNavItem({"Overlays", 2, Theme::Blue});
-    DrawNavItem({"Automation", 3, Theme::Purple});
+    DrawNavItem({"Overlays",   2, Theme::Blue,   2, "3"});
+    DrawNavItem({"Automation", 3, Theme::Purple, 3, "4"});
 
     DrawGroupLabel("SYSTEM");
-    DrawNavItem({"Console", 4, Theme::Cyan});
+    DrawNavItem({"Console",    4, Theme::Cyan,   4, "5"});
+
+    // ── Sidebar foot — FPS / Inference / Build meters ──
+    const float footH = 80.0f;
+    const float availH = ImGui::GetContentRegionAvail().y;
+    if (availH > footH) ImGui::Dummy(ImVec2(0, availH - footH));
+    ImGui::SetCursorPosX(kPanelPadding);
+    ImVec2 footStart = ImGui::GetCursorScreenPos();
+    dl->AddLine(ImVec2(footStart.x - kPanelPadding, footStart.y),
+                ImVec2(footStart.x + kSidebarWidth - kPanelPadding, footStart.y),
+                ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
+    ImGui::Dummy(ImVec2(0, 12.0f));
+
+    auto DrawMeter = [&](const char* label, const char* value, const ImVec4& valColor) {
+        ImGui::SetCursorPosX(kPanelPadding);
+        ImVec2 row = ImGui::GetCursorScreenPos();
+        const float rowW = kSidebarWidth - kPanelPadding * 2.0f;
+        dl->AddText(row,
+                    ImGui::ColorConvertFloat4ToU32(Theme::TextDim), label);
+        ImVec2 vs = ImGui::CalcTextSize(value);
+        if (g_FontMono) ImGui::PushFont(g_FontMono);
+        dl->AddText(g_FontMono ? g_FontMono : ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(row.x + rowW - vs.x, row.y),
+                    ImGui::ColorConvertFloat4ToU32(valColor), value);
+        if (g_FontMono) ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, 18.0f));
+    };
+
+    char fpsBuf[16];
+    snprintf(fpsBuf, sizeof(fpsBuf), "%.0f", ImGui::GetIO().Framerate);
+    DrawMeter("FPS", fpsBuf, Theme::Green);
+    DrawMeter("Inference", "--", Theme::Text);
+    DrawMeter("Build", "12cfd6b", Theme::TextDim);
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    ImVec2 sidebarMax = ImGui::GetItemRectMax();
-    ImVec2 sidebarMin = ImGui::GetItemRectMin();
-    dl = ImGui::GetWindowDrawList();
-    dl->AddLine(ImVec2(sidebarMax.x, sidebarMin.y), ImVec2(sidebarMax.x, sidebarMax.y),
-                ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
+    // Right-edge separator between sidebar and main column.
+    outer->AddLine(ImVec2(sbMax.x, sbPos.y),
+                   ImVec2(sbMax.x, sbMax.y),
+                   ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
+}
+
+// Chip helper — draws a pill-shaped status chip ("KEY value") in mono font
+// at draw-list level. Returns the rendered width so callers can lay out the
+// next chip horizontally.
+static float DrawChip(ImDrawList* dl, ImVec2 origin, const char* key, const char* value,
+                      const ImVec4& bg, const ImVec4& border, const ImVec4& keyCol, const ImVec4& valCol)
+{
+    const float padX = 10.0f;
+    const float h = 26.0f;
+    ImFont* mono = g_FontMono ? g_FontMono : ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    ImVec2 ks = (key && key[0]) ? mono->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0.0f, key) : ImVec2(0, 0);
+    ImVec2 vs = mono->CalcTextSizeA(fs, FLT_MAX, 0.0f, value);
+    const float gap = (key && key[0]) ? 6.0f : 0.0f;
+    const float w = padX * 2.0f + ks.x + gap + vs.x;
+
+    dl->AddRectFilled(origin, ImVec2(origin.x + w, origin.y + h),
+                      ImGui::ColorConvertFloat4ToU32(bg), h * 0.5f);
+    dl->AddRect(origin, ImVec2(origin.x + w, origin.y + h),
+                ImGui::ColorConvertFloat4ToU32(border), h * 0.5f, 0, 1.0f);
+
+    float cx = origin.x + padX;
+    if (key && key[0]) {
+        dl->AddText(mono, fs * 0.85f,
+                    ImVec2(cx, origin.y + (h - ks.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(keyCol), key);
+        cx += ks.x + gap;
+    }
+    dl->AddText(mono, fs,
+                ImVec2(cx, origin.y + (h - vs.y) * 0.5f),
+                ImGui::ColorConvertFloat4ToU32(valCol), value);
+    return w;
 }
 
 static void DrawStatusBar()
@@ -616,85 +836,187 @@ static void DrawStatusBar()
     const bool active = BotMod.IsActive();
     const int currentModel = BotMod.GetCurrentModelIdx();
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Surface);
-    ImGui::BeginChild("##StatusBar", ImVec2(-1, kConsoleToolbarH), false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Base);
+    ImGui::BeginChild("##StatusBar", ImVec2(-1, kTopbarH), false, ImGuiWindowFlags_NoScrollbar);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 wpos = ImGui::GetWindowPos();
     ImVec2 wsz = ImGui::GetWindowSize();
 
-    dl->AddLine(ImVec2(wpos.x, wpos.y + kConsoleToolbarH - 5.0f),
-                ImVec2(wpos.x + wsz.x, wpos.y + kConsoleToolbarH - 5.0f),
+    // Subtle bottom border
+    dl->AddLine(ImVec2(wpos.x, wpos.y + kTopbarH - 0.5f),
+                ImVec2(wpos.x + wsz.x, wpos.y + kTopbarH - 0.5f),
                 ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
 
-    float cx = kPanelPadding - 2.0f;
-    const float cy = 18.0f;
-
-    auto DrawSeparator = [&]() {
-        dl->AddLine(ImVec2(wpos.x + cx, wpos.y + 8), ImVec2(wpos.x + cx, wpos.y + 28),
-                    ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
-        cx += kColumnGap;
-    };
-
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), "Model");
-    cx += ImGui::CalcTextSize("Model").x + 6.0f;
-    const char* modelName = GetModelNameForIndex(currentModel);
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::Text), modelName);
-    cx += ImGui::CalcTextSize(modelName).x + 6.0f;
-
-    if (currentModel >= 0 && currentModel < static_cast<int>(GoySDK::kModelProfiles.size())) {
-        const char* mode = GoySDK::kModelProfiles[currentModel].supportedModes;
-        ImVec2 bts = ImGui::CalcTextSize(mode);
-        float bx = wpos.x + cx;
-        float by = wpos.y + cy - 7.0f;
-        dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bts.x + 10.0f, by + bts.y + 3.0f),
-                          ImGui::ColorConvertFloat4ToU32(Theme::AmberDim), 3.0f);
-        dl->AddText(ImVec2(bx + 5.0f, by + 1.0f), ImGui::ColorConvertFloat4ToU32(Theme::Amber), mode);
-        cx += bts.x + 18.0f;
+    // ── Crumbs (left) — "GoySDK / <Page>"
+    static const char* pageNames[] = {"Controls", "Tuning", "Overlays", "Automation", "Console"};
+    const float crumbY = (kTopbarH - ImGui::GetFontSize()) * 0.5f;
+    float cx = kPanelPadding;
+    dl->AddText(ImVec2(wpos.x + cx, wpos.y + crumbY),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextDim), "GoySDK");
+    cx += ImGui::CalcTextSize("GoySDK").x + 8.0f;
+    dl->AddText(ImVec2(wpos.x + cx, wpos.y + crumbY),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), "/");
+    cx += ImGui::CalcTextSize("/").x + 8.0f;
+    const char* nowLabel = (g_SelectedPage >= 0 && g_SelectedPage <= 4)
+        ? pageNames[g_SelectedPage] : "—";
+    if (g_FontBold) {
+        dl->AddText(g_FontBold, ImGui::GetFontSize(),
+                    ImVec2(wpos.x + cx, wpos.y + crumbY),
+                    ImGui::ColorConvertFloat4ToU32(Theme::Text), nowLabel);
+    } else {
+        dl->AddText(ImVec2(wpos.x + cx, wpos.y + crumbY),
+                    ImGui::ColorConvertFloat4ToU32(Theme::Text), nowLabel);
     }
 
-    DrawSeparator();
-
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), "Tick");
-    cx += ImGui::CalcTextSize("Tick").x + 6.0f;
+    // ── Chip strip + bot pill (right) — laid out from the right edge inward.
+    const char* modelName = GetModelNameForIndex(currentModel);
+    const char* mode = (currentModel >= 0 && currentModel < static_cast<int>(GoySDK::kModelProfiles.size()))
+        ? GoySDK::kModelProfiles[currentModel].supportedModes : "—";
     char tickBuf[8];
     snprintf(tickBuf, sizeof(tickBuf), "%d", cfg.tickSkip);
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::Text), tickBuf);
-    cx += ImGui::CalcTextSize(tickBuf).x + 12.0f;
-
-    DrawSeparator();
-
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), "Device");
-    cx += ImGui::CalcTextSize("Device").x + 6.0f;
     const char* devName = (cfg.inferenceBackend == GoySDK::InferenceBackend::Cuda0) ? "CUDA" : "CPU";
-    dl->AddText(ImVec2(wpos.x + cx, wpos.y + cy - 6),
-                ImGui::ColorConvertFloat4ToU32(Theme::Text), devName);
 
-    const char* toggleLabel = active ? "BOT ON" : "BOT OFF";
-    ImVec2 tls = ImGui::CalcTextSize(toggleLabel);
-    const float dotR = 2.5f;
-    float pillW = tls.x + 22.0f + dotR * 2.0f;
-    float pillX = wpos.x + wsz.x - pillW - kPanelPadding;
-    float pillY = wpos.y + 8.0f;
-    float pillH = 20.0f;
-    ImVec4 pillBg = active ? Theme::GreenDim : Theme::RedDim;
-    ImVec4 pillFg = active ? Theme::Green : Theme::Red;
-    dl->AddRectFilled(ImVec2(pillX, pillY), ImVec2(pillX + pillW, pillY + pillH),
-                      ImGui::ColorConvertFloat4ToU32(pillBg), 4.0f);
-    dl->AddRect(ImVec2(pillX, pillY), ImVec2(pillX + pillW, pillY + pillH),
-                ImGui::ColorConvertFloat4ToU32(ImVec4(pillFg.x, pillFg.y, pillFg.z, 0.2f)), 4.0f, 0, 1.0f);
-    dl->AddCircleFilled(ImVec2(pillX + 8.0f + dotR, pillY + pillH * 0.5f), dotR,
-                        ImGui::ColorConvertFloat4ToU32(pillFg));
-    dl->AddText(ImVec2(pillX + 8.0f + dotR * 2.0f + 6.0f, pillY + (pillH - tls.y) * 0.5f),
-                ImGui::ColorConvertFloat4ToU32(pillFg), toggleLabel);
+    // Bot pill spec
+    const char* botLabel = active ? "BOT ON" : "BOT OFF";
+    const float pillH = 28.0f;
+    ImVec2 bls;
+    if (g_FontBold) bls = g_FontBold->CalcTextSizeA(ImGui::GetFontSize() * 0.85f, FLT_MAX, 0.0f, botLabel);
+    else bls = ImGui::CalcTextSize(botLabel);
+    const float pillW = bls.x + 38.0f;
 
-    ImGui::SetCursorScreenPos(ImVec2(pillX, pillY));
-    if (ImGui::InvisibleButton("##BotPill", ImVec2(pillW, pillH)))
-        Main.Execute([]() { BotMod.ToggleBot(); });
+    // Measure each chip so we can right-align.
+    const float chipH = 26.0f;
+    const float chipY = wpos.y + (kTopbarH - chipH) * 0.5f;
+    const float pillY = wpos.y + (kTopbarH - pillH) * 0.5f;
+    const float gap = 8.0f;
+
+    ImFont* mono = g_FontMono ? g_FontMono : ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+
+    auto chipMeasure = [&](const char* k, const char* v) {
+        ImVec2 ks = (k && k[0]) ? mono->CalcTextSizeA(fs * 0.85f, FLT_MAX, 0.0f, k) : ImVec2(0, 0);
+        ImVec2 vs = mono->CalcTextSizeA(fs, FLT_MAX, 0.0f, v);
+        const float g = (k && k[0]) ? 6.0f : 0.0f;
+        return 20.0f + ks.x + g + vs.x; // 10px pad on each side
+    };
+
+    const float wPill   = pillW;
+    const float wDevice = chipMeasure("Device", devName);
+    const float wTick   = chipMeasure("Tick", tickBuf);
+    const float wMode   = chipMeasure(nullptr, mode);
+    const float wModel  = chipMeasure("Model", modelName);
+
+    float rx = wpos.x + wsz.x - kPanelPadding - wPill;
+    // Bot pill at the rightmost slot
+    {
+        ImVec4 bg = active ? Theme::GreenDim : Theme::RedDim;
+        ImVec4 fg = active ? Theme::Green   : Theme::Red;
+        ImVec2 p0(rx, pillY);
+        ImVec2 p1(rx + wPill, pillY + pillH);
+        // Optional outer glow when on
+        if (active) {
+            for (int i = 3; i >= 1; --i) {
+                const float spread = static_cast<float>(i) * 2.0f;
+                dl->AddRectFilled(ImVec2(p0.x - spread, p0.y - spread),
+                                  ImVec2(p1.x + spread, p1.y + spread),
+                                  ImGui::ColorConvertFloat4ToU32(
+                                      ImVec4(fg.x, fg.y, fg.z, 0.10f / static_cast<float>(i))),
+                                  pillH * 0.5f + spread);
+            }
+        }
+        dl->AddRectFilled(p0, p1, ImGui::ColorConvertFloat4ToU32(bg), pillH * 0.5f);
+        dl->AddRect(p0, p1, ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(fg.x, fg.y, fg.z, 0.30f)), pillH * 0.5f, 0, 1.0f);
+
+        // Pulsing dot. ImGui::GetTime() drives a sine-wave alpha to mimic
+        // the @keyframes pulse animation in the design.
+        const float t = static_cast<float>(ImGui::GetTime());
+        const float pulse = active ? (0.55f + 0.45f * (0.5f + 0.5f * sinf(t * 4.0f))) : 1.0f;
+        const float dotR = 3.5f;
+        ImVec2 dotC(p0.x + 14.0f, p0.y + pillH * 0.5f);
+        dl->AddCircleFilled(dotC, dotR + 2.0f,
+                            ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(fg.x, fg.y, fg.z, 0.18f * pulse)));
+        dl->AddCircleFilled(dotC, dotR,
+                            ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(fg.x, fg.y, fg.z, pulse)));
+
+        // Bold uppercase label.
+        ImFont* bf = g_FontBold ? g_FontBold : ImGui::GetFont();
+        dl->AddText(bf, fs * 0.85f,
+                    ImVec2(p0.x + 14.0f + dotR * 2.0f + 6.0f, p0.y + (pillH - bls.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(fg), botLabel);
+
+        ImGui::SetCursorScreenPos(p0);
+        if (ImGui::InvisibleButton("##BotPill", ImVec2(wPill, pillH)))
+            Main.Execute([]() { BotMod.ToggleBot(); });
+    }
+
+    rx -= gap + wDevice;
+    DrawChip(dl, ImVec2(rx, chipY), "Device", devName,
+             Theme::Elevated, Theme::Border, Theme::TextMuted, Theme::Text);
+    rx -= gap + wTick;
+    DrawChip(dl, ImVec2(rx, chipY), "Tick", tickBuf,
+             Theme::Elevated, Theme::Border, Theme::TextMuted, Theme::Text);
+    rx -= gap + wMode;
+    // Mode chip uses an amber treatment to match the design's .chip-mode.
+    DrawChip(dl, ImVec2(rx, chipY), nullptr, mode,
+             Theme::AmberDim,
+             ImVec4(Theme::Amber.x, Theme::Amber.y, Theme::Amber.z, 0.25f),
+             Theme::Amber, Theme::Amber);
+    rx -= gap + wModel;
+    DrawChip(dl, ImVec2(rx, chipY), "Model", modelName,
+             Theme::Elevated, Theme::Border, Theme::TextMuted, Theme::Text);
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+static void DrawBottomBar()
+{
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Base);
+    ImGui::BeginChild("##BottomBar", ImVec2(-1, kBottomBarH), false, ImGuiWindowFlags_NoScrollbar);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 wpos = ImGui::GetWindowPos();
+    ImVec2 wsz = ImGui::GetWindowSize();
+
+    // Top border
+    dl->AddLine(ImVec2(wpos.x, wpos.y + 0.5f),
+                ImVec2(wpos.x + wsz.x, wpos.y + 0.5f),
+                ImGui::ColorConvertFloat4ToU32(Theme::Border), 1.0f);
+
+    ImFont* mono = g_FontMono ? g_FontMono : ImGui::GetFont();
+    const float fs = std::max(11.0f, ImGui::GetFontSize() - 2.0f);
+    const float ty = wpos.y + (kBottomBarH - fs) * 0.5f;
+
+    // ── Left cluster: HOOKED LED · game · pid ──
+    float lx = wpos.x + kPanelPadding;
+    const float ledR = 3.0f;
+    const ImU32 led = ImGui::ColorConvertFloat4ToU32(Theme::Green);
+    dl->AddCircleFilled(ImVec2(lx + ledR, wpos.y + kBottomBarH * 0.5f), ledR + 2.5f,
+                        ImGui::ColorConvertFloat4ToU32(
+                            ImVec4(Theme::Green.x, Theme::Green.y, Theme::Green.z, 0.25f)));
+    dl->AddCircleFilled(ImVec2(lx + ledR, wpos.y + kBottomBarH * 0.5f), ledR, led);
+    lx += ledR * 2.0f + 8.0f;
+    dl->AddText(mono, fs, ImVec2(lx, ty),
+                ImGui::ColorConvertFloat4ToU32(Theme::Text), "HOOKED");
+    lx += mono->CalcTextSizeA(fs, FLT_MAX, 0.0f, "HOOKED").x + 14.0f;
+    const char* host = "Rocket League";
+    dl->AddText(mono, fs, ImVec2(lx, ty),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextDim), host);
+
+    // ── Right cluster: fps · infer · INSERT hint ──
+    char fpsBuf[24];
+    snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", ImGui::GetIO().Framerate);
+    const char* hint = "INSERT to toggle UI";
+    ImVec2 fpsSz = mono->CalcTextSizeA(fs, FLT_MAX, 0.0f, fpsBuf);
+    ImVec2 hintSz = mono->CalcTextSizeA(fs, FLT_MAX, 0.0f, hint);
+    float rx = wpos.x + wsz.x - kPanelPadding - hintSz.x;
+    dl->AddText(mono, fs, ImVec2(rx, ty),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextDim), hint);
+    rx -= 14.0f + fpsSz.x;
+    dl->AddText(mono, fs, ImVec2(rx, ty),
+                ImGui::ColorConvertFloat4ToU32(Theme::TextDim), fpsBuf);
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -714,7 +1036,7 @@ static void DrawControlsPage()
     const int extraSlots = std::max(0, numSlots - 1);
     const float leftHeight = EstimatePanelHeight(EstimateStackedRowsHeight(3 + extraSlots));
     const float rightHeight = EstimatePanelHeight(
-        EstimateStackedRowsHeight(numSlots, 42.0f) +
+        EstimateStackedRowsHeight(numSlots, 50.0f) +
         30.0f +
         ((numSlots > 1) ? (30.0f + kRowSpacing) : 0.0f)
     );
@@ -817,40 +1139,87 @@ static void DrawControlsPage()
             ImGui::SetCursorPosX(kPanelPadding);
             auto& slot = BotMod.GetSlot(s);
             const int modelIdx = (s == 0) ? currentModel : slot.modelIdx;
+            const bool isHuman = (modelIdx < 0);
 
             ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::Elevated);
             char childId[32];
             snprintf(childId, sizeof(childId), "##Slot%d", s);
-            ImGui::BeginChild(childId, ImVec2(ImGui::GetContentRegionAvail().x - kPanelPadding, 42), true,
+            ImGui::BeginChild(childId, ImVec2(ImGui::GetContentRegionAvail().x - kPanelPadding, 50), true,
                               ImGuiWindowFlags_NoScrollbar);
             {
-                ImGui::SetCursorPos(ImVec2(8, 10));
-
                 ImDrawList* childDl = ImGui::GetWindowDrawList();
-                ImVec2 bp = ImGui::GetCursorScreenPos();
-                childDl->AddRectFilled(bp, ImVec2(bp.x + 22, bp.y + 22),
-                                       ImGui::ColorConvertFloat4ToU32(Theme::Hover), 4.0f);
+                ImVec2 origin = ImGui::GetCursorScreenPos();
+
+                // Slot number badge — gradient based on bot/human, with rim
+                // glow that matches the design's .slot-card.bot / .human swatches.
+                const float badgeSize = 28.0f;
+                ImVec2 b0(origin.x + 4.0f, origin.y + 6.0f);
+                ImVec2 b1(b0.x + badgeSize, b0.y + badgeSize);
+                ImVec4 badgeTop, badgeBot, badgeBorder, badgeText;
+                if (isHuman) {
+                    badgeTop = ImVec4(Theme::Purple.x, Theme::Purple.y, Theme::Purple.z, 0.18f);
+                    badgeBot = ImVec4(Theme::Purple.x, Theme::Purple.y, Theme::Purple.z, 0.06f);
+                    badgeBorder = ImVec4(Theme::Purple.x, Theme::Purple.y, Theme::Purple.z, 0.20f);
+                    badgeText = Theme::Purple;
+                } else {
+                    badgeTop = ImVec4(Theme::Green.x, Theme::Green.y, Theme::Green.z, 0.18f);
+                    badgeBot = ImVec4(Theme::Green.x, Theme::Green.y, Theme::Green.z, 0.06f);
+                    badgeBorder = ImVec4(Theme::Green.x, Theme::Green.y, Theme::Green.z, 0.20f);
+                    badgeText = Theme::Green;
+                }
+                childDl->AddRectFilledMultiColor(b0, b1,
+                    ImGui::ColorConvertFloat4ToU32(badgeTop),
+                    ImGui::ColorConvertFloat4ToU32(badgeTop),
+                    ImGui::ColorConvertFloat4ToU32(badgeBot),
+                    ImGui::ColorConvertFloat4ToU32(badgeBot));
+                childDl->AddRect(b0, b1,
+                    ImGui::ColorConvertFloat4ToU32(badgeBorder), 6.0f, 0, 1.0f);
                 char idxBuf[4];
                 snprintf(idxBuf, sizeof(idxBuf), "%d", s);
-                ImVec2 idxSz = ImGui::CalcTextSize(idxBuf);
-                childDl->AddText(ImVec2(bp.x + (22 - idxSz.x) * 0.5f, bp.y + (22 - idxSz.y) * 0.5f),
-                                 ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), idxBuf);
-                ImGui::SetCursorPos(ImVec2(38, 6));
+                ImFont* mono = g_FontMono ? g_FontMono : ImGui::GetFont();
+                ImVec2 idxSz = mono->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, idxBuf);
+                childDl->AddText(mono, ImGui::GetFontSize(),
+                                 ImVec2(b0.x + (badgeSize - idxSz.x) * 0.5f,
+                                        b0.y + (badgeSize - idxSz.y) * 0.5f),
+                                 ImGui::ColorConvertFloat4ToU32(badgeText), idxBuf);
 
-                const char* name = (modelIdx >= 0) ? GetModelNameForIndex(modelIdx) : "Human";
-                ImGui::TextColored(Theme::Text, "%s", name);
-                ImGui::SetCursorPosX(38);
-                if (modelIdx >= 0 && modelIdx < profileCount) {
+                // Name + sub
+                const char* name = isHuman ? "Human" : GetModelNameForIndex(modelIdx);
+                if (g_FontBold) {
+                    childDl->AddText(g_FontBold, ImGui::GetFontSize(),
+                                     ImVec2(origin.x + 42.0f, origin.y + 6.0f),
+                                     ImGui::ColorConvertFloat4ToU32(Theme::Text), name);
+                } else {
+                    childDl->AddText(ImVec2(origin.x + 42.0f, origin.y + 6.0f),
+                                     ImGui::ColorConvertFloat4ToU32(Theme::Text), name);
+                }
+                char sub[64];
+                if (isHuman) {
+                    snprintf(sub, sizeof(sub), "controller input · passthrough");
+                } else if (modelIdx >= 0 && modelIdx < profileCount) {
                     const auto& prof = GoySDK::kModelProfiles[modelIdx];
-                    ImGui::TextColored(Theme::TextMuted, "%s  %d obs", prof.supportedModes, cfg.GetExpectedObsCount());
+                    snprintf(sub, sizeof(sub), "%s · %d obs", prof.supportedModes, cfg.GetExpectedObsCount());
+                } else {
+                    sub[0] = '\0';
                 }
+                childDl->AddText(mono, ImGui::GetFontSize() - 2.0f,
+                                 ImVec2(origin.x + 42.0f, origin.y + 24.0f),
+                                 ImGui::ColorConvertFloat4ToU32(Theme::TextMuted), sub);
 
-                if (s == 0) {
-                    float badgeW = ImGui::CalcTextSize("Primary").x + 12.0f;
-                    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - badgeW - kPanelPadding, 12.0f));
-                    Badge("Primary", Theme::Amber, Theme::AmberDim);
-                }
-
+                // Right-side badge: Primary (slot 0) / Bot / Human
+                const char* badgeText2 = (s == 0) ? "Primary" : (isHuman ? "Human" : "Bot");
+                ImVec4 badgeFg, badgeBg;
+                if (s == 0)        { badgeFg = Theme::Amber;  badgeBg = Theme::AmberDim;  }
+                else if (isHuman)  { badgeFg = Theme::Purple; badgeBg = Theme::PurpleDim; }
+                else               { badgeFg = Theme::Green;  badgeBg = Theme::GreenDim;  }
+                ImVec2 bs = ImGui::CalcTextSize(badgeText2);
+                const float padX = 8.0f, padY = 3.0f;
+                float bx = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - bs.x - padX * 2.0f - kPanelPadding;
+                float by = origin.y + (50 - (bs.y + padY * 2.0f)) * 0.5f;
+                childDl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bs.x + padX * 2.0f, by + bs.y + padY * 2.0f),
+                                       ImGui::ColorConvertFloat4ToU32(badgeBg), 4.0f);
+                childDl->AddText(ImVec2(bx + padX, by + padY),
+                                 ImGui::ColorConvertFloat4ToU32(badgeFg), badgeText2);
             }
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -1246,8 +1615,16 @@ void GUIComponent::Render()
 
     IO.MouseDrawCursor = IsOpen;
 
+    // 1–5 keyboard shortcuts mirror the design's nav .kbd hints.
     if (IsOpen) {
-        ImGui::SetNextWindowSize(ImVec2(928, 592), ImGuiCond_Always);
+        for (int i = 0; i < 5; ++i) {
+            if (ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_1 + i), false))
+                g_SelectedPage = i;
+        }
+    }
+
+    if (IsOpen) {
+        ImGui::SetNextWindowSize(ImVec2(kWindowW, kWindowH), ImGuiCond_Always);
         ImGui::Begin("###AbuseMain", &IsOpen,
                      ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoScrollbar |
@@ -1262,27 +1639,12 @@ void GUIComponent::Render()
         {
             DrawStatusBar();
 
-            ImGui::BeginChild("##Content", ImVec2(-1, -1), false, ImGuiWindowFlags_NoScrollbar);
-            ImGui::SetCursorPos(ImVec2(kPageGutter, kPanelPadding - 2.0f));
+            // Page area — leave room for the bottom bar.
+            const float contentH = ImGui::GetContentRegionAvail().y - kBottomBarH;
+            ImGui::BeginChild("##Content", ImVec2(-1, contentH), false, ImGuiWindowFlags_NoScrollbar);
+            ImGui::SetCursorPos(ImVec2(kPageGutter, kPanelPadding));
 
-            static const char* pageTitles[] = {"Controls", "Tuning", "Overlays", "Automation", "Console"};
-            static const char* pageSubs[] = {
-                "Bot configuration and splitscreen management",
-                "Humanizer and performance parameters",
-                "In-game visual indicators",
-                "Game flow automation settings",
-                "System log output"
-            };
-            if (g_SelectedPage >= 0 && g_SelectedPage <= 4) {
-                if (g_FontBold) ImGui::PushFont(g_FontBold);
-                ImGui::TextColored(Theme::Text, "%s", pageTitles[g_SelectedPage]);
-                if (g_FontBold) ImGui::PopFont();
-                ImGui::SetCursorPosX(kPageGutter);
-                ImGui::TextColored(Theme::TextMuted, "%s", pageSubs[g_SelectedPage]);
-                ImGui::Dummy(ImVec2(0, kHeaderBodyGap));
-                ImGui::SetCursorPosX(kPageGutter);
-            }
-
+            // Page title is gone — the topbar's crumbs cover that.
             if (g_SelectedPage < 0 || g_SelectedPage > 4) g_SelectedPage = 0;
             switch (g_SelectedPage) {
                 case 0: DrawControlsPage(); break;
@@ -1292,6 +1654,8 @@ void GUIComponent::Render()
                 case 4: DrawConsolePage(); break;
             }
             ImGui::EndChild();
+
+            DrawBottomBar();
         }
         ImGui::EndChild();
 
@@ -1299,7 +1663,7 @@ void GUIComponent::Render()
         ImVec2 wa = ImGui::GetWindowPos();
         ImVec2 wsz = ImGui::GetWindowSize();
         dl->AddRect(wa, ImVec2(wa.x + wsz.x, wa.y + wsz.y),
-                    ImGui::ColorConvertFloat4ToU32(Theme::Border), 12.0f, 0, 1.0f);
+                    ImGui::ColorConvertFloat4ToU32(Theme::BorderStrong), 16.0f, 0, 1.0f);
 
         ImGui::End();
     }
