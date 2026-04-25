@@ -6,47 +6,69 @@
     -->
 
     <!-- ═══════════════ Core palette ═══════════════ -->
-    <Color x:Key="PalBg">#FF0A0A0F</Color>
-    <Color x:Key="PalBgRaised">#FF111118</Color>
-    <Color x:Key="PalBgCard">#FF0F0F16</Color>
+    <!-- Aligned with the Claude Design "GoySDK Loader" handoff: deeper background,
+         brighter crimson accent, calmer card surfaces. -->
+    <Color x:Key="PalBg">#FF06060A</Color>
+    <Color x:Key="PalBgWindow">#FF0C0C0E</Color>
+    <Color x:Key="PalBgRaised">#FF161618</Color>
+    <Color x:Key="PalBgCard">#FF101013</Color>
     <Color x:Key="PalBgFrame">#FF16161F</Color>
     <Color x:Key="PalBgHover">#FF1C1C28</Color>
-    <Color x:Key="PalBorder">#FF1E1E2A</Color>
-    <Color x:Key="PalBorderLight">#FF282838</Color>
+    <Color x:Key="PalBorder">#1AFFFFFF</Color>
+    <Color x:Key="PalBorderLight">#26FFFFFF</Color>
+    <Color x:Key="PalRowDivider">#0AFFFFFF</Color>
 
-    <Color x:Key="PalAccent">#FFD42B38</Color>
-    <Color x:Key="PalAccentHover">#FFE83545</Color>
-    <Color x:Key="PalAccentDim">#FF8C1C24</Color>
-    <Color x:Key="PalAccentGlow">#33D42B38</Color>
+    <Color x:Key="PalAccent">#FFFF3B3B</Color>
+    <Color x:Key="PalAccentHover">#FFFF5252</Color>
+    <Color x:Key="PalAccentDim">#FFC41E1E</Color>
+    <Color x:Key="PalAccentGlow">#55FF3B3B</Color>
 
-    <Color x:Key="PalText">#FFE8E8F0</Color>
-    <Color x:Key="PalTextDim">#FF808098</Color>
-    <Color x:Key="PalTextMuted">#FF50506A</Color>
+    <Color x:Key="PalText">#FFFFFFFF</Color>
+    <Color x:Key="PalTextDim">#A6FFFFFF</Color>
+    <Color x:Key="PalTextMuted">#52FFFFFF</Color>
+    <Color x:Key="PalTextFaint">#33FFFFFF</Color>
 
-    <Color x:Key="PalGreen">#FF38D975</Color>
-    <Color x:Key="PalWarn">#FFE8A830</Color>
-    <Color x:Key="PalErr">#FFFF4060</Color>
+    <Color x:Key="PalGreen">#FF3DDC84</Color>
+    <Color x:Key="PalWarn">#FFF5B342</Color>
+    <Color x:Key="PalErr">#FFFF3B3B</Color>
+
+    <!-- Status-pill backgrounds (very low alpha, tinted) -->
+    <Color x:Key="PalGreenBg">#143DDC84</Color>
+    <Color x:Key="PalGreenBorder">#403DDC84</Color>
 
     <!-- ═══════════════ Brush layer ═══════════════ -->
 
     <!-- Window -->
-    <SolidColorBrush x:Key="BrushImGuiWindowBg" Color="{StaticResource PalBg}"/>
+    <SolidColorBrush x:Key="BrushImGuiWindowBg" Color="{StaticResource PalBgWindow}"/>
+    <SolidColorBrush x:Key="BrushLoaderShellBg" Color="{StaticResource PalBg}"/>
     <SolidColorBrush x:Key="BrushLoaderTitleBar" Color="{StaticResource PalBgRaised}"/>
     <SolidColorBrush x:Key="BrushLoaderTitleBarBorder" Color="{StaticResource PalBorder}"/>
     <SolidColorBrush x:Key="BrushLoaderChromeHover" Color="{StaticResource PalBgHover}"/>
     <SolidColorBrush x:Key="BrushLoaderChromeCloseHover" Color="#FFE81123"/>
+    <SolidColorBrush x:Key="BrushLoaderRowDivider" Color="{StaticResource PalRowDivider}"/>
 
     <!-- Cards -->
     <SolidColorBrush x:Key="BrushLoaderCard" Color="{StaticResource PalBgCard}"/>
+    <SolidColorBrush x:Key="BrushLoaderCardSubtle" Color="#05FFFFFF"/>
     <SolidColorBrush x:Key="BrushLoaderFooter" Color="#FF080810"/>
+    <SolidColorBrush x:Key="BrushLoaderLogBg" Color="#4D000000"/>
 
-    <!-- Accent strip under title bar — crimson gradient -->
+    <!-- Status pill (host online / idle) -->
+    <SolidColorBrush x:Key="BrushLoaderPillOkBg" Color="{StaticResource PalGreenBg}"/>
+    <SolidColorBrush x:Key="BrushLoaderPillOkBorder" Color="{StaticResource PalGreenBorder}"/>
+
+    <!-- Vertical titlebar gradient + horizontal accent strip below it -->
+    <LinearGradientBrush x:Key="BrushLoaderTitleBarGradient" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="{StaticResource PalBgRaised}" Offset="0"/>
+        <GradientStop Color="#FF111113" Offset="1"/>
+    </LinearGradientBrush>
+
     <LinearGradientBrush x:Key="BrushLoaderTopAccent" StartPoint="0,0.5" EndPoint="1,0.5">
-        <GradientStop Color="#00D42B38" Offset="0"/>
-        <GradientStop Color="#FFD42B38" Offset="0.3"/>
-        <GradientStop Color="#FFE83545" Offset="0.5"/>
-        <GradientStop Color="#FFD42B38" Offset="0.7"/>
-        <GradientStop Color="#00D42B38" Offset="1"/>
+        <GradientStop Color="#00FF3B3B" Offset="0"/>
+        <GradientStop Color="#FFFF3B3B" Offset="0.3"/>
+        <GradientStop Color="#FFFF5252" Offset="0.5"/>
+        <GradientStop Color="#FFFF3B3B" Offset="0.7"/>
+        <GradientStop Color="#00FF3B3B" Offset="1"/>
     </LinearGradientBrush>
 
     <!-- ImGui-aligned brushes for code-behind FindResource -->
@@ -63,6 +85,7 @@
     <SolidColorBrush x:Key="BrushImGuiText" Color="{StaticResource PalText}"/>
     <SolidColorBrush x:Key="BrushImGuiTextDim" Color="{StaticResource PalTextDim}"/>
     <SolidColorBrush x:Key="BrushImGuiTextMuted" Color="{StaticResource PalTextMuted}"/>
+    <SolidColorBrush x:Key="BrushImGuiTextFaint" Color="{StaticResource PalTextFaint}"/>
 
     <SolidColorBrush x:Key="BrushImGuiGreen" Color="{StaticResource PalGreen}"/>
     <SolidColorBrush x:Key="BrushImGuiWarn" Color="{StaticResource PalWarn}"/>

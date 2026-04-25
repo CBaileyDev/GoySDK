@@ -17,6 +17,11 @@ public partial class MainWindow : Window
     private Process? _hostProcess;
     private bool _injected;
 
+    // Animations driven from code so they can be toggled with state changes
+    // (the idle ring on the host row, the inject-button spinner).
+    private Storyboard? _hostIdleSpinSb;
+    private Storyboard? _injectSpinSb;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -62,23 +67,161 @@ public partial class MainWindow : Window
         LoaderSessionLog.WriteGlobal($"Loader UI started from '{Environment.ProcessPath}'.");
 
         BeginWindowEnterAnimation();
+        StartHostIdleSpinner();
 
         var steam = ProcessFinder.TryGetSteamInstalledExe();
         SteamHint.Text = steam != null
-            ? $"Steam: {steam}"
+            ? $"Steam: {Path.GetDirectoryName(steam)}"
             : "Start the client manually if not using Steam.";
+        // Footer shows the same source-of-truth path in compressed form.
+        FooterSteamPath.Text = steam != null
+            ? $"STEAM: {ShortenPath(Path.GetDirectoryName(steam) ?? string.Empty)}"
+            : string.Empty;
 
         await RunBootstrapAsync();
+    }
+
+    private static string ShortenPath(string path)
+    {
+        // Compresses "C:\Steam\steamapps\common\rocketleague" → "C:\Steam\…\rocketleague".
+        if (string.IsNullOrEmpty(path)) return string.Empty;
+        var parts = path.Split(System.IO.Path.DirectorySeparatorChar);
+        if (parts.Length <= 3) return path;
+        return $"{parts[0]}\\{parts[1]}\\…\\{parts[^1]}";
     }
 
     private void BeginWindowEnterAnimation()
     {
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var dur = TimeSpan.FromMilliseconds(300);
 
-        AnimateIn(SubtitleLine, SubtitleTrans, 6, TimeSpan.Zero, TimeSpan.FromMilliseconds(250), ease);
-        AnimateIn(StatusCard, StatusCardTrans, 8, TimeSpan.FromMilliseconds(80), TimeSpan.FromMilliseconds(300), ease);
-        AnimateIn(HostCard, HostCardTrans, 8, TimeSpan.FromMilliseconds(160), TimeSpan.FromMilliseconds(300), ease);
-        AnimateIn(FooterBar, null, 0, TimeSpan.FromMilliseconds(220), TimeSpan.FromMilliseconds(200), ease);
+        // Header (title block + version subtitle slide in together).
+        // The HeaderMark logo is ambient and fades with the window itself.
+        AnimateIn((UIElement)SubtitleLine.Parent!, SubtitleTrans, 6, TimeSpan.Zero, dur, ease);
+
+        // Cards stagger in from below for a layered settle.
+        AnimateIn(StatusCard, StatusCardTrans, 8, TimeSpan.FromMilliseconds(60), dur, ease);
+        AnimateIn(HostCard, HostCardTrans, 8, TimeSpan.FromMilliseconds(120), dur, ease);
+        AnimateIn(AutoInjectCard, AutoInjectCardTrans, 8, TimeSpan.FromMilliseconds(160), dur, ease);
+        AnimateIn(SessionLogCard, SessionLogTrans, 8, TimeSpan.FromMilliseconds(200), dur, ease);
+
+        // Status pill drops down from above for a different feel than the cards.
+        AnimateIn(HostStatusPill, HostStatusPillTrans, -4,
+            TimeSpan.FromMilliseconds(140), dur, ease);
+
+        AnimateIn(FooterBar, null, 0,
+            TimeSpan.FromMilliseconds(240), TimeSpan.FromMilliseconds(220), ease);
+    }
+
+    private void StartHostIdleSpinner()
+    {
+        // The hollow ring on the "Host process" prereq row spins while the host
+        // hasn't been detected yet. Stops when host comes online (the row swaps
+        // to a green check via Visibility on HostIconOk / HostIconIdle).
+        if (_hostIdleSpinSb != null) return;
+
+        var anim = new DoubleAnimation
+        {
+            From = 0,
+            To = 360,
+            Duration = new Duration(TimeSpan.FromSeconds(1.1)),
+            RepeatBehavior = RepeatBehavior.Forever,
+        };
+        _hostIdleSpinSb = new Storyboard();
+        Storyboard.SetTarget(anim, HostIconIdleRotate);
+        Storyboard.SetTargetProperty(anim, new PropertyPath(RotateTransform.AngleProperty));
+        _hostIdleSpinSb.Children.Add(anim);
+        _hostIdleSpinSb.Begin();
+    }
+
+    private void StartInjectButtonSpinner()
+    {
+        if (_injectSpinSb != null) return;
+
+        var anim = new DoubleAnimation
+        {
+            From = 0,
+            To = 360,
+            Duration = new Duration(TimeSpan.FromSeconds(0.8)),
+            RepeatBehavior = RepeatBehavior.Forever,
+        };
+        _injectSpinSb = new Storyboard();
+        Storyboard.SetTarget(anim, InjectSpinnerRotate);
+        Storyboard.SetTargetProperty(anim, new PropertyPath(RotateTransform.AngleProperty));
+        _injectSpinSb.Children.Add(anim);
+        _injectSpinSb.Begin();
+    }
+
+    private void StopInjectButtonSpinner()
+    {
+        if (_injectSpinSb == null) return;
+        _injectSpinSb.Stop();
+        _injectSpinSb.Children.Clear();
+        _injectSpinSb = null;
+        InjectSpinnerRotate.Angle = 0;
+    }
+
+    private enum InjectButtonState { Idle, Working, Done }
+
+    private void SetInjectButtonVisual(InjectButtonState state, string? workingLabel = null)
+    {
+        switch (state)
+        {
+            case InjectButtonState.Idle:
+                InjectIcon.Visibility = Visibility.Visible;
+                InjectSpinner.Visibility = Visibility.Collapsed;
+                InjectCheckIcon.Visibility = Visibility.Collapsed;
+                BtnInjectLabel.Text = "Inject";
+                StopInjectButtonSpinner();
+                break;
+            case InjectButtonState.Working:
+                InjectIcon.Visibility = Visibility.Collapsed;
+                InjectSpinner.Visibility = Visibility.Visible;
+                InjectCheckIcon.Visibility = Visibility.Collapsed;
+                BtnInjectLabel.Text = workingLabel ?? "Working…";
+                StartInjectButtonSpinner();
+                break;
+            case InjectButtonState.Done:
+                InjectIcon.Visibility = Visibility.Collapsed;
+                InjectSpinner.Visibility = Visibility.Collapsed;
+                InjectCheckIcon.Visibility = Visibility.Visible;
+                BtnInjectLabel.Text = "Injected";
+                StopInjectButtonSpinner();
+                break;
+        }
+    }
+
+    private void UpdateHostStatusPill(bool hostRunning)
+    {
+        if (hostRunning)
+        {
+            HostStatusPillText.Text = "HOST ONLINE";
+            HostStatusPillText.Foreground = (Brush)FindResource("BrushImGuiGreen")!;
+            HostStatusPillDot.Fill = (Brush)FindResource("BrushImGuiGreen")!;
+            HostStatusPill.Background = (Brush)FindResource("BrushLoaderPillOkBg")!;
+            HostStatusPill.BorderBrush = (Brush)FindResource("BrushLoaderPillOkBorder")!;
+        }
+        else
+        {
+            HostStatusPillText.Text = "IDLE";
+            HostStatusPillText.Foreground = (Brush)FindResource("BrushImGuiTextMuted")!;
+            HostStatusPillDot.Fill = (Brush)FindResource("BrushImGuiTextMuted")!;
+            HostStatusPill.Background = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
+            HostStatusPill.BorderBrush = new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+        }
+    }
+
+    private void AppendHostFoundLogLine(int? pid)
+    {
+        if (pid is int p)
+        {
+            HostLogLine.Text = $"Host found · PID {p}.";
+            HostLogRow.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            HostLogRow.Visibility = Visibility.Collapsed;
+        }
     }
 
     private static void AnimateIn(UIElement el, TranslateTransform? trans, double slideY,
@@ -151,6 +294,8 @@ public partial class MainWindow : Window
         SetupDetail.Text = "Checking prerequisites…";
         SetupProgress.IsIndeterminate = true;
         SetupBytes.Text = "";
+        SetupPercentLabel.Text = "WORKING…";
+        SetupMark.Progress = 0.0;
 
         var status = new Progress<string>(t =>
         {
@@ -162,6 +307,7 @@ public partial class MainWindow : Window
                 {
                     SetupProgress.IsIndeterminate = true;
                     SetupBytes.Text = "";
+                    SetupPercentLabel.Text = "WORKING…";
                 }
 
                 if (t.StartsWith("Downloading", StringComparison.OrdinalIgnoreCase) ||
@@ -171,11 +317,13 @@ public partial class MainWindow : Window
                     {
                         SetupProgress.IsIndeterminate = true;
                         SetupBytes.Text = "";
+                        SetupPercentLabel.Text = "WORKING…";
                     }
                     else
                     {
                         SetupProgress.IsIndeterminate = false;
                         SetupProgress.Value = 0;
+                        SetupPercentLabel.Text = "0%";
                     }
                 }
             });
@@ -188,13 +336,19 @@ public partial class MainWindow : Window
                 SetupProgress.IsIndeterminate = false;
                 if (p.TotalBytes is long total && total > 0)
                 {
-                    SetupProgress.Value = 100.0 * p.BytesReceived / total;
+                    var pct = 100.0 * p.BytesReceived / total;
+                    SetupProgress.Value = pct;
                     SetupBytes.Text = $"{BytesToMb(p.BytesReceived):F1} / {BytesToMb(total):F1} MB";
+                    SetupPercentLabel.Text = $"{pct:F0}%";
+                    // Mirror download progress on the dialog's animated G mark
+                    // so the logo visibly fills along with the progress bar.
+                    SetupMark.Progress = pct / 100.0;
                 }
                 else
                 {
                     SetupProgress.IsIndeterminate = true;
                     SetupBytes.Text = $"{BytesToMb(p.BytesReceived):F1} MB";
+                    SetupPercentLabel.Text = "WORKING…";
                 }
             });
         });
@@ -207,6 +361,8 @@ public partial class MainWindow : Window
             SetupProgress.IsIndeterminate = false;
             SetupProgress.Value = 100;
             SetupBytes.Text = "";
+            SetupPercentLabel.Text = "100%";
+            SetupMark.Progress = 1.0;
         }
         catch (OperationCanceledException)
         {
@@ -311,15 +467,30 @@ public partial class MainWindow : Window
             if (_hostProcess == null)
             {
                 _injected = false;
-                HostStatusLine.Text = "Host: not detected";
-                HostStatusLine.Foreground = (Brush)FindResource("BrushImGuiTextMuted")!;
+                HostStatusLine.Text = "Waiting for RocketLeague.exe…";
+                HostStatusLine.Foreground = (Brush)FindResource("BrushImGuiTextDim")!;
+                TargetPid.Text = "Not detected";
+                TargetPid.Foreground = (Brush)FindResource("BrushImGuiTextMuted")!;
                 LogLine.Text = "Start the target game, then inject.";
+                AppendHostFoundLogLine(null);
+                UpdateHostStatusPill(hostRunning: false);
+                // Header logo dims slightly when no target is present.
+                HeaderMark.Progress = 0.4;
+                HeaderMark.Speed = 1.0;
+                // Reset the inject button if the user yanked the host mid-flight.
+                if (HeaderMark != null) SetInjectButtonVisual(InjectButtonState.Idle);
             }
             else
             {
-                HostStatusLine.Text = $"Host: running (PID {_hostProcess.Id})";
+                HostStatusLine.Text = $"RocketLeague.exe · PID {_hostProcess.Id} · Steam";
                 HostStatusLine.Foreground = (Brush)FindResource("BrushImGuiGreen")!;
+                TargetPid.Text = $"Running · PID {_hostProcess.Id}";
+                TargetPid.Foreground = (Brush)FindResource("BrushImGuiGreen")!;
                 LogLine.Text = "Ready.";
+                AppendHostFoundLogLine(_hostProcess.Id);
+                UpdateHostStatusPill(hostRunning: true);
+                HeaderMark.Progress = 1.0;
+                HeaderMark.Speed = 1.0;
 
                 if (AutoInjectToggle.IsChecked == true && !_injected)
                 {
@@ -330,8 +501,11 @@ public partial class MainWindow : Window
         }
         catch
         {
-            HostStatusLine.Text = "Host: not detected";
-            HostStatusLine.Foreground = (Brush)FindResource("BrushImGuiTextMuted")!;
+            HostStatusLine.Text = "Waiting for RocketLeague.exe…";
+            HostStatusLine.Foreground = (Brush)FindResource("BrushImGuiTextDim")!;
+            TargetPid.Text = "Not detected";
+            TargetPid.Foreground = (Brush)FindResource("BrushImGuiTextMuted")!;
+            UpdateHostStatusPill(hostRunning: false);
             _hostProcess = null;
         }
 
@@ -500,11 +674,16 @@ public partial class MainWindow : Window
         }
 
         BtnInject.IsEnabled = false;
+        SetInjectButtonVisual(InjectButtonState.Working, "Unpacking…");
+        // Header logo speeds up + de-fills slightly to communicate "working".
+        HeaderMark.Progress = 0.7;
+        HeaderMark.Speed = 2.0;
         try
         {
             if (!PayloadExtractor.IsPayloadEmbedded())
             {
                 LoaderSessionLog.WriteGlobal("Injection aborted: embedded payload is missing.");
+                SetInjectButtonVisual(InjectButtonState.Idle);
                 if (!silent)
                     MessageBox.Show(this,
                         "Bot payload is not embedded in this build. Run scripts/Package-Payload.ps1 after building internal_bot, then rebuild GoyLoader.",
@@ -544,6 +723,7 @@ public partial class MainWindow : Window
             }
 
             LogLine.Text = "Unpacking bot files…";
+            SetInjectButtonVisual(InjectButtonState.Working, "Unpacking…");
             var dir = PayloadExtractor.ExtractPayloadToCache();
             LoaderSessionLog.WriteGlobal($"Payload extracted to '{dir}'.");
             LoaderSessionLog.WritePayload(dir, $"Injection attempt started. silent={silent}, pid={_hostProcess.Id}.");
@@ -551,6 +731,7 @@ public partial class MainWindow : Window
             LoaderSessionLog.WritePayload(dir, $"Payload diagnostic report refreshed at '{reportPath}'.");
             var dll = Path.Combine(dir, "GoySDK.dll");
             LogLine.Text = "Injecting…";
+            SetInjectButtonVisual(InjectButtonState.Working, "Injecting…");
             var handle = DllInjector.InjectLoadLibrary(_hostProcess.Id, dll);
             LoaderSessionLog.WritePayload(dir, $"InjectLoadLibrary returned handle 0x{handle.ToInt64():X}.");
             var dllName = Path.GetFileName(dll);
@@ -567,6 +748,7 @@ public partial class MainWindow : Window
             // GoySDKCore.dll is ~64 MB and depends on ~260 MB of LibTorch DLLs, so
             // the bridge thread may need several seconds to finish LoadLibraryW.
             // Poll every 500 ms for up to 10 seconds before giving up.
+            SetInjectButtonVisual(InjectButtonState.Working, "Loading core…");
             var coreLoaded = false;
             for (var coreAttempt = 0; coreAttempt < 20 && !coreLoaded; coreAttempt++)
             {
@@ -596,6 +778,10 @@ public partial class MainWindow : Window
             }
             LoaderSessionLog.WritePayload(dir, $"Injection path completed through core load for PID {_hostProcess.Id}.");
             LogLine.Text = $"Injected (PID {_hostProcess.Id})";
+            LogLine.Foreground = (Brush)FindResource("BrushImGuiGreen")!;
+            SetInjectButtonVisual(InjectButtonState.Done);
+            HeaderMark.Progress = 1.0;
+            HeaderMark.Speed = 1.0;
 
             if (!silent)
                 MessageBox.Show(this,
@@ -606,11 +792,14 @@ public partial class MainWindow : Window
         {
             LoaderSessionLog.WriteGlobal("Injection cancelled.");
             LogLine.Text = "Cancelled.";
+            SetInjectButtonVisual(InjectButtonState.Idle);
         }
         catch (Exception ex)
         {
             LoaderSessionLog.WriteGlobal($"Injection exception: {ex.GetType().Name}: {ex.Message}");
             LogLine.Text = ex.Message;
+            LogLine.Foreground = (Brush)FindResource("BrushImGuiErr")!;
+            SetInjectButtonVisual(InjectButtonState.Idle);
             if (!silent)
                 MessageBox.Show(this, ex.Message, "Injection failed", MessageBoxButton.OK, MessageBoxImage.Error);
         }
@@ -626,6 +815,12 @@ public partial class MainWindow : Window
         _lifetimeCts.Dispose();
         _rlTimer?.Stop();
         _rlTimer = null;
+
+        // Stop UI storyboards so the dispatcher doesn't hold them past close.
+        try { _hostIdleSpinSb?.Stop(); } catch { /* ignore */ }
+        try { _injectSpinSb?.Stop(); } catch { /* ignore */ }
+        _hostIdleSpinSb = null;
+        _injectSpinSb = null;
         try
         {
             _hostProcess?.Dispose();

@@ -1,0 +1,76 @@
+<UserControl x:Class="GoyLoader.Controls.GoyMark"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignWidth="56" d:DesignHeight="56"
+             Background="Transparent" SnapsToDevicePixels="True">
+
+    <!--
+        Animated G mark — concentric ring with progress fill + spinning comet head.
+        Logical drawing canvas is 100×100; the host Viewbox scales it to whatever
+        Width/Height the consumer sets. The ring + stem are tilted 15° so the G's
+        opening faces upper-right; the comet sweeps continuously while the
+        accent ring fills based on Progress (0–1).
+
+        Public properties (set from XAML or code-behind):
+          Accent    — accent brush (default #FF3B3B)
+          Progress  — 0..1 fill of the accent ring (default 1.0)
+          Spinning  — whether the comet head is animated (default true)
+          Speed     — multiplier on the comet rotation (default 1.0; higher = faster)
+    -->
+
+    <Viewbox Stretch="Uniform" RenderOptions.EdgeMode="Unspecified">
+        <Grid Width="100" Height="100" Background="Transparent">
+
+            <!-- Soft accent halo behind the mark -->
+            <Ellipse x:Name="HaloEllipse" Width="88" Height="88"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     IsHitTestVisible="False">
+                <Ellipse.Fill>
+                    <RadialGradientBrush x:Name="HaloBrush" GradientOrigin="0.5,0.5" Center="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+                        <GradientStop x:Name="HaloStopInner" Color="#73FF3B3B" Offset="0"/>
+                        <GradientStop x:Name="HaloStopOuter" Color="#00FF3B3B" Offset="1"/>
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+
+            <!-- Tilted ring + G-stem group -->
+            <Grid RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform>
+                    <RotateTransform Angle="15"/>
+                </Grid.RenderTransform>
+
+                <!-- Background ring (subtle gutter behind the progress arc) -->
+                <Ellipse x:Name="BgRing" Width="76" Height="76"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         StrokeThickness="3" StrokeDashCap="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                         Stroke="#12FFFFFF"/>
+
+                <!-- Progress ring — same circle, dynamic dash array (set in code-behind from Progress) -->
+                <Ellipse x:Name="FgRing" Width="76" Height="76"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"
+                         StrokeThickness="3.5" StrokeDashCap="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+
+                <!-- "G" stem: a horizontal line from center extending right, capped by a small dot.
+                     The stem geometry lives in a 100×100 canvas so its math matches the SVG source. -->
+                <Canvas Width="100" Height="100" IsHitTestVisible="False">
+                    <Line x:Name="StemLine" X1="50" Y1="50" X2="82" Y2="50"
+                          StrokeThickness="3.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                    <Ellipse x:Name="StemDot" Canvas.Left="80" Canvas.Top="48" Width="4" Height="4"/>
+                </Canvas>
+            </Grid>
+
+            <!-- Spinning comet head: two concentric dots ride the top of the ring,
+                 group-rotated continuously by CometStoryboard. -->
+            <Canvas Width="100" Height="100" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.5">
+                <Canvas.RenderTransform>
+                    <RotateTransform x:Name="CometRotate" Angle="0"/>
+                </Canvas.RenderTransform>
+                <Ellipse x:Name="CometOuter" Canvas.Left="47.6" Canvas.Top="9.6" Width="4.8" Height="4.8" Fill="#FFFFE8E8"/>
+                <Ellipse x:Name="CometInner" Canvas.Left="48.6" Canvas.Top="10.6" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
+            </Canvas>
+        </Grid>
+    </Viewbox>
+</UserControl>
