@@ -43,7 +43,11 @@ struct PlayerBotSlot {
     InferenceBackend inferenceWhenBotLoaded = InferenceBackend::CPU;
 
     PlayerSnapshot localSnapshot{};
-    APlayerController_TA* assignedPC = nullptr; 
+    APlayerController_TA* assignedPC = nullptr;
+
+    /// Reused buffer for BuildDefaultActionMask so RunSlotInferenceTick doesn't
+    /// allocate a fresh std::vector every inference tick (~120 Hz/tickSkip per slot).
+    std::vector<uint8_t> actionMaskScratch{};
 
     bool IsBot() const { return modelIdx >= 0 && bot != nullptr; }
 };

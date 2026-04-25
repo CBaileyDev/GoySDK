@@ -161,8 +161,9 @@ bool ExtractDataEntries(const void* zipData, size_t zipSize,
 // ---- RLInference ---------------------------------------------------------
 namespace RLInference {
 
-// The discrete action table is host-owned and injected via BotConfig::discrete_actions.
-// See P0/06: keeping a second copy here would silently desync from GoySDK::ActionMask.hpp.
+// Discrete action table is host-owned and injected via BotConfig::discrete_actions.
+// Keeping a second copy here would silently desync from the GoySDK action enumeration
+// the policy was trained against — every logit index would decode to the wrong action.
 
 // ------ Impl: holds MLP weights and runs inference -----------------------
 struct Bot::Impl {
@@ -284,6 +285,13 @@ bool Bot::is_initialized() const {
     return impl_ != nullptr && impl_->ready;
 }
 
+void Bot::ResetLastInferenceState() {
+    last_output_ = {};
+    last_debug_.available = false;
+    last_debug_.action_index = -1;
+    last_debug_.logits.clear();
+}
+
 bool Bot::forward() {
     return forward_impl(nullptr);
 }
@@ -295,16 +303,13 @@ bool Bot::forward(const std::vector<uint8_t>& actionMask) {
 bool Bot::forward_impl(const std::vector<uint8_t>* actionMask) {
     if (!impl_ || obs_.empty()) return false;
 
-    // ---- Stub mode: model didn't load → neutral output ------------------
     if (!impl_->ready) {
-        last_output_ = {};
-        last_debug_.available = false;
-        last_debug_.action_index = -1;
-        last_debug_.logits.clear();
+        // Stub mode: model didn't load → neutral output, but still report
+        // success so the caller can apply input each tick.
+        ResetLastInferenceState();
         return true;
     }
 
-    // ---- Real inference -------------------------------------------------
     try {
         torch::NoGradGuard ng;
         auto inp = torch::from_blob(
@@ -312,35 +317,27 @@ bool Bot::forward_impl(const std::vector<uint8_t>* actionMask) {
             torch::kFloat32).clone();
 
         auto h = impl_->RunMLP(inp, impl_->shared);
-        // Activation between shared head output and policy head input
+        // Activation between shared-head output and policy-head input.
         h = impl_->useLeaky ? torch::leaky_relu(h, 0.01) : torch::relu(h);
         auto logits = impl_->RunMLP(h, impl_->policy);
 
         auto flat = logits.squeeze().contiguous();
         const int nAct = static_cast<int>(flat.numel());
 
-        // Validate the host-injected discrete-action table dimension first.
-        // A model/table mismatch is a configuration bug and must be visible.
+        // A model/table mismatch is a configuration bug; surface it as a hard
+        // failure so the host can log + bail rather than emit silent neutral.
         const auto& acts = config_.discrete_actions;
         if (static_cast<int>(acts.size()) != nAct) {
-            last_output_ = {};
-            last_debug_.available = false;
-            last_debug_.action_index = -1;
-            last_debug_.logits.clear();
+            ResetLastInferenceState();
             return false;
         }
-
-        // Then validate the mask shape against the policy output dim.
         if (actionMask && static_cast<int>(actionMask->size()) != nAct) {
-            last_output_ = {};
-            last_debug_.available = false;
-            last_debug_.action_index = -1;
-            last_debug_.logits.clear();
+            ResetLastInferenceState();
             return false;
         }
 
-        // Apply the mask BEFORE argmax/sampling so we sample from the
-        // softmax-over-allowed-actions distribution the policy was trained on.
+        // Mask BEFORE argmax/sampling — the policy was trained on the
+        // softmax-over-allowed-actions distribution, not on post-hoc repair.
         if (actionMask) {
             auto* logitsData = flat.data_ptr<float>();
             bool anyAllowed = false;
@@ -352,10 +349,7 @@ bool Bot::forward_impl(const std::vector<uint8_t>* actionMask) {
                 }
             }
             if (!anyAllowed) {
-                last_output_ = {};
-                last_debug_.available = false;
-                last_debug_.action_index = -1;
-                last_debug_.logits.clear();
+                ResetLastInferenceState();
                 return false;
             }
         }
@@ -375,11 +369,7 @@ bool Bot::forward_impl(const std::vector<uint8_t>* actionMask) {
             : ActionOutput{};
         return true;
     } catch (...) {
-        // On any error during inference, return neutral.
-        last_output_ = {};
-        last_debug_.available = false;
-        last_debug_.action_index = -1;
-        last_debug_.logits.clear();
+        ResetLastInferenceState();
         return true;
     }
 }

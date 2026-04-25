@@ -492,9 +492,6 @@ void OverlayRenderer::OnRender() {
 
 }
 
-// P3/10: empty OnCreate/OnDestroy + their constructor/destructor calls removed.
-// Module has no virtual OnCreate/OnDestroy hooks, so removing only the
-// definitions would have produced a link error. Both ends are gone now.
 OverlayRenderer::OverlayRenderer()
     : Module("GameEventHook", "Hooks into game events", States::STATES_All) {}
 

@@ -345,6 +345,18 @@ bool BotModule::LoadBotForSlot(int slotIdx, int modelIdx) {
 }
 
 
+// Durations for the ViGEm splitscreen "press join" state machine consumed
+// by TickJoinCountdowns. Negative = wait for the OS to enumerate the
+// freshly-connected pad; positive = hold the join button. 60 ticks at the
+// game's ~120 Hz tick rate ≈ 0.5s.
+static constexpr int kJoinPressDelayTicks = 60;
+static constexpr int kJoinPressHoldTicks  = 60;
+
+static void ScheduleJoinPress(std::array<int, BotModule::kMaxSlots>& countdowns, int slotIdx) {
+    if (slotIdx < 0 || slotIdx >= static_cast<int>(countdowns.size())) return;
+    countdowns[slotIdx] = -kJoinPressDelayTicks;
+}
+
 void BotModule::AddSplitscreen() {
     if (gameEvent_) {
         Console.Error("[GoySDK] Cannot add splitscreen during an active game");
@@ -454,17 +466,6 @@ void BotModule::RemoveSplitscreen() {
     }
 }
 
-// P1/04: durations for the ViGEm splitscreen "press join" state machine.
-// Negative phase = wait for the OS to enumerate the freshly-connected pad.
-// Positive phase = hold the join button so the game registers the new player.
-static constexpr int kJoinPressDelayTicks = 60;
-static constexpr int kJoinPressHoldTicks  = 60;
-
-static void ScheduleJoinPress(std::array<int, BotModule::kMaxSlots>& countdowns, int slotIdx) {
-    if (slotIdx < 0 || slotIdx >= static_cast<int>(countdowns.size())) return;
-    countdowns[slotIdx] = -kJoinPressDelayTicks;
-}
-
 void BotModule::TickJoinCountdowns() {
     for (int i = 0; i < kMaxSlots; i++) {
         if (joinPressCountdown_[i] < 0) {
@@ -563,7 +564,6 @@ bool BotModule::AssignModel(int slotIdx, int modelIdx) {
     if (modelIdx == slot.modelIdx && slot.bot && slot.inferenceWhenBotLoaded == slot.config.inferenceBackend)
         return true;
 
-    // P3/01: removed unused `bool wasActive = botActive_;` — no path read it.
     return LoadBotForSlot(slotIdx, modelIdx);
 }
 
@@ -708,11 +708,9 @@ void BotModule::PlayerTickCalled(const PostEvent& event) {
                     ReadGameState(pc);
                     ReadBoostPads();
 
-                    // P1/02: kickoff state is per-MATCH, not per-slot. Update
-                    // it exactly once per game tick here. Previously this lived
-                    // in RunSlotInferenceTick and ran N× per tick (once per
-                    // active bot slot), so the kickoffTimer_ < 2.5f window
-                    // expired in 2.5/N seconds with N active bots.
+                    // Kickoff state is per-MATCH, not per-slot — must update
+                    // once per game tick, not once per active slot, or the
+                    // kickoffTimer_ < 2.5f window expires N× faster.
                     const float ballXY = sqrtf(ballSnapshot_.pos.X * ballSnapshot_.pos.X +
                                                ballSnapshot_.pos.Y * ballSnapshot_.pos.Y);
                     const float ballSpeed = sqrtf(ballSnapshot_.vel.X * ballSnapshot_.vel.X +
@@ -748,24 +746,30 @@ void BotModule::PlayerTickCalled(const PostEvent& event) {
             if (autoForfeit_ && !forfeitVotedThisMatch_ &&
                 matchState.valid && matchState.canVoteToForfeit) {
                 try {
-                    APRI_TA* localPRI = pc->PRI;
-                    const int timeRemaining = matchState.gameStateTimeRemaining;
-                    if (localPRI && localPRI->Team) {
+                    // Lambda lets us guard-clause out of the predicate-stack
+                    // without nesting 5 levels deep.
+                    [&] {
+                        APRI_TA* localPRI = pc->PRI;
+                        if (!localPRI || !localPRI->Team) return;
+
                         const int myTeamIdx = localPRI->Team->TeamIndex;
-                        if (myTeamIdx >= 0 && myTeamIdx <= 1) {
-                            const int myScore = matchState.teamScores[myTeamIdx];
-                            const int oppScore = matchState.teamScores[1 - myTeamIdx];
-                            const int diff = oppScore - myScore;
-                            if (diff >= autoForfeitScoreDiff_ && timeRemaining <= autoForfeitTimeSec_) {
-                                auto* myTeam = static_cast<ATeam_TA*>(localPRI->Team);
-                                if (myTeam) {
-                                    myTeam->VoteToForfeit(localPRI);
-                                    forfeitVotedThisMatch_ = true;
-                                    Console.Notify("[GoySDK] Auto-forfeit vote cast (down " + std::to_string(diff) + ", " + std::to_string(timeRemaining) + "s left)");
-                                }
-                            }
-                        }
-                    }
+                        if (myTeamIdx < 0 || myTeamIdx > 1) return;
+
+                        const int timeRemaining = matchState.gameStateTimeRemaining;
+                        const int myScore  = matchState.teamScores[myTeamIdx];
+                        const int oppScore = matchState.teamScores[1 - myTeamIdx];
+                        const int diff = oppScore - myScore;
+                        if (diff < autoForfeitScoreDiff_ || timeRemaining > autoForfeitTimeSec_) return;
+
+                        auto* myTeam = static_cast<ATeam_TA*>(localPRI->Team);
+                        if (!myTeam) return;
+
+                        myTeam->VoteToForfeit(localPRI);
+                        forfeitVotedThisMatch_ = true;
+                        Console.Notify("[GoySDK] Auto-forfeit vote cast (down " +
+                                       std::to_string(diff) + ", " +
+                                       std::to_string(timeRemaining) + "s left)");
+                    }();
                 } catch (const std::exception& e) {
                     Console.Error(std::string("[GoySDK] Exception in auto-forfeit: ") + e.what());
                 } catch (...) {
@@ -1014,11 +1018,11 @@ void BotModule::RunSlotInferenceTick(int slotIdx, APlayerController_TA* pc) {
     // P0/05: apply the action mask BEFORE sampling/argmax so the policy samples
     // from softmax-over-allowed-actions (its training-time distribution),
     // instead of sampling unmasked and then deterministically repairing.
-    const std::vector<uint8_t> actionMask = BuildDefaultActionMask(slot.localSnapshot);
-    if (!slot.bot->forward(actionMask)) {
+    BuildDefaultActionMask(slot.localSnapshot, slot.actionMaskScratch);
+    if (!slot.bot->forward(slot.actionMaskScratch)) {
         if (diag) {
             Console.Error("[GoySDK] S" + std::to_string(slotIdx) +
-                          " forward(mask) false mask=" + std::to_string(actionMask.size()));
+                          " forward(mask) false mask=" + std::to_string(slot.actionMaskScratch.size()));
         }
         // Don't hold a stale lastAction when the masked path detects a real
         // mismatch — emit neutral so the controller actually goes idle.

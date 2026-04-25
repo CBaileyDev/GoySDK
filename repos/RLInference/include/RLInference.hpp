@@ -94,6 +94,7 @@ public:
 
 private:
     bool forward_impl(const std::vector<uint8_t>* actionMask);
+    void ResetLastInferenceState();
 
     BotConfig config_{};
     std::vector<float> obs_{};

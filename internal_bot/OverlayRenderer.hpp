@@ -35,8 +35,6 @@ public:
     OverlayRenderer();
     ~OverlayRenderer() override;
 
-    // P3/10: removed empty OnCreate/OnDestroy declarations + their
-    // constructor/destructor calls (Module has no virtual hooks for them).
     void OnRender();
 
     static void Hook();

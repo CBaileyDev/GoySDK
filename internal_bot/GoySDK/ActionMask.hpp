@@ -118,18 +118,20 @@ inline const std::vector<DiscreteAction> &GetDefaultDiscreteActions() {
   return GetDefaultDiscreteActionTables().actions;
 }
 
-inline std::vector<uint8_t>
-BuildDefaultActionMask(const PlayerSnapshot &player) {
+// Hot-path-friendly overload: writes into a caller-owned buffer so the per-
+// inference-tick call site doesn't allocate a fresh std::vector each time.
+inline void BuildDefaultActionMask(const PlayerSnapshot &player,
+                                   std::vector<uint8_t> &out) {
   const auto &tables = GetDefaultDiscreteActionTables();
-  std::vector<uint8_t> mask(tables.actions.size(), 0);
+  out.assign(tables.actions.size(), 0);
 
   auto applyMask = [&](const std::vector<uint8_t> &source, bool add) {
     for (size_t i = 0; i < source.size(); ++i) {
       if (add) {
-        mask[i] = static_cast<uint8_t>(mask[i] | source[i]);
+        out[i] = static_cast<uint8_t>(out[i] | source[i]);
       } else {
-        mask[i] =
-            static_cast<uint8_t>(mask[i] & static_cast<uint8_t>(!source[i]));
+        out[i] =
+            static_cast<uint8_t>(out[i] & static_cast<uint8_t>(!source[i]));
       }
     }
   };
@@ -147,7 +149,12 @@ BuildDefaultActionMask(const PlayerSnapshot &player) {
   if (player.hasFlipOrJump || IsTurtled(player)) {
     applyMask(tables.jumpMask, true);
   }
+}
 
+inline std::vector<uint8_t>
+BuildDefaultActionMask(const PlayerSnapshot &player) {
+  std::vector<uint8_t> mask;
+  BuildDefaultActionMask(player, mask);
   return mask;
 }
 

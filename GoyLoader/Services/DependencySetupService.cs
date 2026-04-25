@@ -10,6 +10,8 @@ namespace GoyLoader.Services;
 public static class DependencySetupService
 {
     private static readonly string CacheDir = Path.Combine(Path.GetTempPath(), "GoyLoader", "deps");
+    // Resolved once so the path-prefix containment check doesn't re-canonicalize on every call.
+    private static readonly string CacheDirFull = Path.GetFullPath(CacheDir);
 
     /// <summary>
     /// P0/03: reject GitHub release asset names that could escape the cache
@@ -48,8 +50,7 @@ public static class DependencySetupService
     private static string ResolveCachedInstallerPath(string fileName)
     {
         var dest = Path.GetFullPath(Path.Combine(CacheDir, fileName));
-        var cacheDirFull = Path.GetFullPath(CacheDir);
-        if (!dest.StartsWith(cacheDirFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        if (!dest.StartsWith(CacheDirFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"Refusing to write installer outside cache directory (resolved to '{dest}').");
         return dest;
