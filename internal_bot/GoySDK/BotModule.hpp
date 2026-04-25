@@ -164,8 +164,9 @@ private:
     static bool autoForfeit_;
     static int  autoForfeitScoreDiff_;
     static int  autoForfeitTimeSec_;
-    static bool autoRequeue_;      
-    static bool autoChat_;         
+    // P1/05: autoRequeue_/autoChat_ removed — they were declared with public
+    // accessors but never read by any implementation. Re-add only when the
+    // matchmaking / quickchat UFunctions are wired and rate-limited.
     static int  skipReplayCooldown_;
     static bool forfeitVotedThisMatch_;
     static bool modelLoading_;
@@ -175,8 +176,6 @@ public:
     static bool& AutoForfeit()          { return autoForfeit_; }
     static int&  AutoForfeitScoreDiff() { return autoForfeitScoreDiff_; }
     static int&  AutoForfeitTimeSec()   { return autoForfeitTimeSec_; }
-    static bool& AutoRequeue()          { return autoRequeue_; }
-    static bool& AutoChat()             { return autoChat_; }
     /// Returns a snapshot of the boost pad states, copied under guiMutex_.
     /// The snapshot is safe to read from any thread without further locking.
     /// Returning by value is intentional (P1/01): the previous reference-return

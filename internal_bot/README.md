@@ -28,7 +28,7 @@ Instance storage, game-state tracking, and hooks are still **title-specific**; e
 #### Requirements
 
 - Unreal concepts: globals, objects, reflection, UFunction / ProcessEvent
-- C++20, Windows tooling for MSVC / headers
+- C++17, Windows tooling for MSVC / headers
 - Detours (see `https://github.com/microsoft/Detours/`)
 
 ## Features

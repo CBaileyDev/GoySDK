@@ -19,7 +19,10 @@ set(RLINFERENCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../repos/RLInference")
 add_subdirectory(${RLINFERENCE_DIR} ${CMAKE_BINARY_DIR}/RLInference)
 
 
-file(GLOB_RECURSE TNTS_SOURCES
+# P3/11: CONFIGURE_DEPENDS makes CMake re-glob on every build so newly-added
+# .cpp files get picked up without manually rerunning configure. Requires
+# CMake >= 3.12; this project already requires 3.18.
+file(GLOB_RECURSE TNTS_SOURCES CONFIGURE_DEPENDS
     "Components/*.cpp"
     "Modules/*.cpp"
     "Extensions/*.cpp"
@@ -29,7 +32,7 @@ file(GLOB_RECURSE TNTS_SOURCES
     "pch.cpp"
 )
 
-file(GLOB_RECURSE GOYSDK_SOURCES
+file(GLOB_RECURSE GOYSDK_SOURCES CONFIGURE_DEPENDS
     "GoySDK/*.cpp"
 )
 

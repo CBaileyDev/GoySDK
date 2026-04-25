@@ -246,15 +246,9 @@ void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
     TArray<ACar_TA*> cars = gevt->Cars;
     TArray<ABall_TA*> balls = gevt->GameBalls;
 
-    for (APlayerController_TA* localPlayer : localPlayers) {
-       
-        ACar_TA* car = localPlayer->Car;
-        APRI_TA* PRI = localPlayer->PRI;
+    // P3/02: dead empty-body for-loop removed — used to read car/PRI per
+    // local player into unused locals on every render frame.
 
-       
-    }
-
-   
     int localTeamIdx = -1;
     if (localPlayerPRI && localPlayerPRI->Team) {
         localTeamIdx = localPlayerPRI->Team->TeamIndex;
@@ -498,22 +492,17 @@ void OverlayRenderer::OnRender() {
 
 }
 
-OverlayRenderer::OverlayRenderer() : Module("GameEventHook", "Hooks into game events", States::STATES_All) {
-    OnCreate();
-}
-OverlayRenderer::~OverlayRenderer() { OnDestroy(); }
+// P3/10: empty OnCreate/OnDestroy + their constructor/destructor calls removed.
+// Module has no virtual OnCreate/OnDestroy hooks, so removing only the
+// definitions would have produced a link error. Both ends are gone now.
+OverlayRenderer::OverlayRenderer()
+    : Module("GameEventHook", "Hooks into game events", States::STATES_All) {}
 
-void OverlayRenderer::OnCreate() {
-   
-}
-
-void OverlayRenderer::OnDestroy() {
-   
-}
+OverlayRenderer::~OverlayRenderer() = default;
 
 void OverlayRenderer::Initialize() {
     Hook();
-    Console.Write("OverlayRenderer Initalized.");
+    Console.Write("OverlayRenderer Initialized.");
 }
 
 

@@ -1,7 +1,7 @@
 #include "BotModule.hpp"
 #include "UEHookStrings.hpp"
 #include "ActionMask.hpp"
-#include "GameState.hpp"
+// P3/13: GameState.hpp removed — its single helper was a passthrough.
 #include <RLInference.hpp>
 #include <torch/torch.h>
 
@@ -78,8 +78,6 @@ bool                          BotModule::modelLoading_ = false;
 bool                          BotModule::autoForfeit_ = false;
 int                           BotModule::autoForfeitScoreDiff_ = 5;
 int                           BotModule::autoForfeitTimeSec_ = 30;
-bool                          BotModule::autoRequeue_ = false;
-bool                          BotModule::autoChat_ = false;
 int                           BotModule::skipReplayCooldown_ = 0;
 bool                          BotModule::forfeitVotedThisMatch_ = false;
 
@@ -387,7 +385,6 @@ void BotModule::AddSplitscreen() {
         return;
     }
 
-   
     if (inputMethod_ == InputMethod::ViGem) {
         if (!vigemCtrl_.IsInitialized()) {
             if (!vigemCtrl_.Initialize()) {
@@ -395,11 +392,21 @@ void BotModule::AddSplitscreen() {
                 return;
             }
         }
+
         if (!vigemCtrl_.IsPadConnected(nextId)) {
-            if (vigemCtrl_.ConnectPad(nextId)) {
-                Console.Write("[GoySDK] ViGEm pad " + std::to_string(nextId) + " connected for splitscreen input.");
+            if (!vigemCtrl_.ConnectPad(nextId)) {
+                Console.Error("[GoySDK] Failed to connect ViGEm pad " + std::to_string(nextId) + " for splitscreen input.");
+                return;
             }
+            Console.Write("[GoySDK] ViGEm pad " + std::to_string(nextId) + " connected for splitscreen input.");
         }
+
+        // P1/04: schedule the "press join" sequence so the new splitscreen
+        // controller actually claims its slot. Previously joinPressCountdown_
+        // was only ever 0 or positive — the negative-wait phase that would
+        // initiate the press was unreachable, making this whole feature inert.
+        ScheduleJoinPress(joinPressCountdown_, nextId);
+        Console.Write("[GoySDK] Scheduled ViGEm join press for controller " + std::to_string(nextId) + ".");
     }
 }
 
@@ -447,17 +454,27 @@ void BotModule::RemoveSplitscreen() {
     }
 }
 
+// P1/04: durations for the ViGEm splitscreen "press join" state machine.
+// Negative phase = wait for the OS to enumerate the freshly-connected pad.
+// Positive phase = hold the join button so the game registers the new player.
+static constexpr int kJoinPressDelayTicks = 60;
+static constexpr int kJoinPressHoldTicks  = 60;
+
+static void ScheduleJoinPress(std::array<int, BotModule::kMaxSlots>& countdowns, int slotIdx) {
+    if (slotIdx < 0 || slotIdx >= static_cast<int>(countdowns.size())) return;
+    countdowns[slotIdx] = -kJoinPressDelayTicks;
+}
+
 void BotModule::TickJoinCountdowns() {
     for (int i = 0; i < kMaxSlots; i++) {
         if (joinPressCountdown_[i] < 0) {
-           
+            // Wait phase: count up to zero, then transition to the hold phase.
             joinPressCountdown_[i]++;
             if (joinPressCountdown_[i] == 0) {
-               
-                joinPressCountdown_[i] = 60;
+                joinPressCountdown_[i] = kJoinPressHoldTicks;
             }
         } else if (joinPressCountdown_[i] > 0) {
-           
+            // Hold phase: assert join, decrement, release at zero.
             vigemCtrl_.PressJoin(i);
             joinPressCountdown_[i]--;
             if (joinPressCountdown_[i] == 0) {
@@ -524,10 +541,14 @@ bool BotModule::AssignModel(int slotIdx, int modelIdx) {
     auto& slot = playerSlots_[slotIdx];
 
     if (modelIdx == -1) {
-       
         slot.bot.reset();
         slot.obsBuilder.reset();
         slot.modelIdx = -1;
+        // P2/02: reset humanizer + tick state so a future re-bot of this slot
+        // doesn't carry over stale EMA prev_ values from the previous model.
+        slot.humanizer.Reset();
+        slot.lastAction.fill(0.f);
+        slot.tickCounter = 0;
         if (inputMethod_ == InputMethod::ViGem) {
             vigemCtrl_.SendNeutral(slotIdx);
         }
@@ -542,7 +563,7 @@ bool BotModule::AssignModel(int slotIdx, int modelIdx) {
     if (modelIdx == slot.modelIdx && slot.bot && slot.inferenceWhenBotLoaded == slot.config.inferenceBackend)
         return true;
 
-    bool wasActive = botActive_;
+    // P3/01: removed unused `bool wasActive = botActive_;` — no path read it.
     return LoadBotForSlot(slotIdx, modelIdx);
 }
 
@@ -847,7 +868,8 @@ void BotModule::ReadGameState(APlayerController_TA* anyPC) {
         snap.rawHasWorldContact = car->WorldContact.bHasContact != 0;
         snap.rawWorldContactNormal = car->WorldContact.Normal;
 
-        snap.isOnGround = ComputeObservedOnGround(rawOnGround);
+        // P3/13: was `ComputeObservedOnGround(rawOnGround)`, a passthrough helper.
+        snap.isOnGround = rawOnGround;
 
         snap.hasFlipOrJump = !doubleJumped;
 
@@ -869,6 +891,20 @@ void BotModule::ReadGameState(APlayerController_TA* anyPC) {
         }
 
         allPlayers_.push_back(snap);
+    }
+
+    // P3/04: if we iterated cars but never saw a BoostComponent, emit a one-shot
+    // diagnostic so absence is visible. Without this, "diag never printed" was
+    // ambiguous between "code path not reached" and "no boost component yet".
+    if (!boostDiagDone_ && cars.size() > 0) {
+        bool sawAnyBoostComp = false;
+        for (int i = 0; i < static_cast<int>(cars.size()); i++) {
+            if (cars[i] && cars[i]->BoostComponent) { sawAnyBoostComp = true; break; }
+        }
+        if (!sawAnyBoostComp) {
+            Console.Write("[GoySDK] BOOST DIAG: no car had a BoostComponent on this tick.");
+            boostDiagDone_ = true;
+        }
     }
 }
 

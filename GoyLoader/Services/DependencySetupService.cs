@@ -11,6 +11,50 @@ public static class DependencySetupService
 {
     private static readonly string CacheDir = Path.Combine(Path.GetTempPath(), "GoyLoader", "deps");
 
+    /// <summary>
+    /// P0/03: reject GitHub release asset names that could escape the cache
+    /// directory. The loader runs as Administrator (per app.manifest), so an
+    /// asset named "..\..\Windows\System32\evil.exe" would otherwise produce
+    /// admin-context arbitrary-write + execute.
+    /// </summary>
+    private static string SanitizeAssetFileName(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            throw new InvalidOperationException("Asset name is empty.");
+
+        if (raw.IndexOfAny(new[] { '/', '\\' }) >= 0)
+            throw new InvalidOperationException($"Asset name contains a path separator: '{raw}'.");
+        if (raw.Contains(".."))
+            throw new InvalidOperationException($"Asset name contains '..': '{raw}'.");
+
+        foreach (var c in Path.GetInvalidFileNameChars())
+            if (raw.IndexOf(c) >= 0)
+                throw new InvalidOperationException($"Asset name contains invalid character: '{raw}'.");
+
+        if (!raw.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Asset name is not an .exe: '{raw}'.");
+
+        if (raw.Length > 128)
+            throw new InvalidOperationException($"Asset name too long ({raw.Length} chars).");
+
+        return raw;
+    }
+
+    /// <summary>
+    /// P0/03: build the destination path and confirm GetFullPath resolves it
+    /// inside CacheDir even after `..` collapsing. Pair with SanitizeAssetFileName
+    /// — both are belt-and-suspenders.
+    /// </summary>
+    private static string ResolveCachedInstallerPath(string fileName)
+    {
+        var dest = Path.GetFullPath(Path.Combine(CacheDir, fileName));
+        var cacheDirFull = Path.GetFullPath(CacheDir);
+        if (!dest.StartsWith(cacheDirFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Refusing to write installer outside cache directory (resolved to '{dest}').");
+        return dest;
+    }
+
     /// <summary>Install VC++ x64 if missing (required for native DLLs / injection). Idempotent.</summary>
     public static async Task EnsureVcRedistPresentAsync(
         IProgress<string> status,
@@ -56,11 +100,37 @@ public static class DependencySetupService
         }
     }
 
+    /// <summary>
+    /// P0/04: which installer is being run. Determines exit-code interpretation
+    /// AND the Authenticode signer allow-list applied before execution.
+    /// </summary>
+    private enum InstallerKind
+    {
+        VcRedist,
+        ViGEmBus,
+    }
+
     private static bool IsVcRedistSuccess(int exitCode) =>
         exitCode == 0 || exitCode == 1638 || exitCode == 3010;
 
     private static bool IsInstallerProbablyOk(int exitCode) =>
         exitCode == 0 || exitCode == 3010;
+
+    /// <summary>
+    /// P0/04: per-kind publisher allow-list. Match is case-insensitive substring
+    /// against the certificate Subject. Microsoft VC++ binaries are signed by
+    /// "Microsoft Corporation"; ViGEmBus is signed by "Nefarius".
+    /// </summary>
+    private static bool IsExpectedSigner(InstallerKind kind, string? subject)
+    {
+        if (string.IsNullOrEmpty(subject)) return false;
+        return kind switch
+        {
+            InstallerKind.VcRedist => subject.Contains("Microsoft Corporation", StringComparison.OrdinalIgnoreCase),
+            InstallerKind.ViGEmBus => subject.Contains("Nefarius", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
+    }
 
     public static async Task DownloadAndInstallVcRedistAsync(
         IProgress<string> status,
@@ -78,7 +148,7 @@ public static class DependencySetupService
             cancellationToken);
 
         status.Report("Installing Visual C++ Redistributable (silent)…");
-        await RunInstallerAsync(dest, "/install /quiet /norestart", treatAsVcRedist: true, cancellationToken);
+        await RunInstallerAsync(dest, "/install /quiet /norestart", InstallerKind.VcRedist, cancellationToken);
 
         for (var i = 0; i < 8; i++)
         {
@@ -111,13 +181,15 @@ public static class DependencySetupService
         status.Report("Fetching ViGEmBus download from GitHub…");
 
         var (url, fileName) = await GetLatestViGEmBusAssetAsync(cancellationToken);
-        var dest = Path.Combine(CacheDir, fileName);
+        // P0/03: sanitize before path use; ResolveCachedInstallerPath confirms
+        // the resolved write path is inside CacheDir even after `..` collapsing.
+        var dest = ResolveCachedInstallerPath(fileName);
 
         status.Report($"Downloading {fileName}…");
         await FileDownloader.DownloadToFileAsync(url, dest, downloadProgress, cancellationToken);
 
         status.Report("Installing ViGEmBus driver (silent)…");
-        await RunInstallerAsync(dest, "/quiet /norestart", treatAsVcRedist: false, cancellationToken);
+        await RunInstallerAsync(dest, "/quiet /norestart", InstallerKind.ViGEmBus, cancellationToken);
 
         TryStartViGEmService();
 
@@ -188,7 +260,17 @@ public static class DependencySetupService
                     ?? release.Assets.FirstOrDefault(a => a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
 
                 if (asset != null && !string.IsNullOrEmpty(asset.BrowserDownloadUrl))
-                    return (new Uri(asset.BrowserDownloadUrl), asset.Name);
+                {
+                    // P0/03: pin URL host so a poisoned upstream release that points
+                    // BrowserDownloadUrl at a non-GitHub host can't redirect us.
+                    var assetUri = new Uri(asset.BrowserDownloadUrl);
+                    if (!string.Equals(assetUri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
+                        !assetUri.Host.EndsWith(".githubusercontent.com", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException($"Asset URL is not on GitHub: {assetUri}");
+                    }
+                    return (assetUri, SanitizeAssetFileName(asset.Name));
+                }
             }
         }
         catch when (!cancellationToken.IsCancellationRequested)
@@ -200,8 +282,28 @@ public static class DependencySetupService
         return (new Uri(ViGEmFallbackUrl), ViGEmFallbackFileName);
     }
 
-    private static async Task RunInstallerAsync(string fileName, string arguments, bool treatAsVcRedist, CancellationToken cancellationToken)
+    private static async Task RunInstallerAsync(string fileName, string arguments, InstallerKind installerKind, CancellationToken cancellationToken)
     {
+        // P0/04: fail closed unless the file has a valid Authenticode signature
+        // AND the embedded certificate's subject matches the expected publisher.
+        // Signature validity alone only proves "signed by SOMEONE chained to a
+        // Microsoft root" — the signer subject is what binds it to the
+        // expected vendor.
+        var trust = AuthenticodeVerifier.Verify(fileName);
+        if (!trust.Trusted)
+        {
+            throw new InvalidOperationException(
+                $"Refusing to execute installer with invalid Authenticode signature: {fileName}\n" +
+                $"  detail:    {trust.Detail}\n" +
+                $"  subject:   {trust.Subject ?? "<none>"}\n" +
+                $"  thumbprint:{trust.Thumbprint ?? "<none>"}");
+        }
+        if (!IsExpectedSigner(installerKind, trust.Subject))
+        {
+            throw new InvalidOperationException(
+                $"Authenticode signature is valid but signer is not on the allow-list for {installerKind}: '{trust.Subject ?? "<none>"}'");
+        }
+
         // Already running elevated (app manifest). No Verb=runas to avoid a second UAC prompt.
         var psi = new ProcessStartInfo
         {
@@ -218,7 +320,7 @@ public static class DependencySetupService
         await proc.WaitForExitAsync(cancellationToken);
         var code = proc.ExitCode;
 
-        if (treatAsVcRedist)
+        if (installerKind == InstallerKind.VcRedist)
         {
             if (!IsVcRedistSuccess(code))
                 throw new InvalidOperationException($"VC++ installer exited with code {code}.");

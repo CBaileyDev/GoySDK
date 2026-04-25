@@ -8,19 +8,22 @@ namespace GoySDK {
 
 class Humanizer {
 public:
-    Humanizer(float smoothFactor = 0.80f, float deadzone = 0.08f, float jitter = 0.015f)
+    // P2/01: deadzone defaults to 0.0f because the input here is the policy's
+    // discrete output, not analog physical-controller noise. Callers who want
+    // controller-style input filtering can still pass a non-zero value.
+    Humanizer(float smoothFactor = 0.80f, float deadzone = 0.00f, float jitter = 0.015f)
         : smooth_(smoothFactor), dead_(deadzone), jitter_(jitter),
           rng_(std::random_device{}()), dist_(-1.f, 1.f) {}
 
-   
     float Smooth(float target, float& prev) const {
-        float alpha = 1.f - smooth_;
+        // P2/01: deadzone applies to the TARGET (intent), not to the smoothed
+        // value. Previously it ran post-smoothing, which clipped intentional
+        // small intermediate values produced by the EMA ramp-up.
+        if (fabsf(target) < dead_) target = 0.f;
+
+        const float alpha = 1.f - smooth_;
         float val = prev + (target - prev) * alpha;
 
-       
-        if (fabsf(val) < dead_) val = 0.f;
-
-       
         if (fabsf(val) > 0.95f && jitter_ > 0.f) {
             val += dist_(rng_) * jitter_;
             if (val >  1.f) val =  1.f;

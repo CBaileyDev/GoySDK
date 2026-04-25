@@ -99,7 +99,10 @@ struct Config {
 
    
     float smoothFactor = 0.30f;
-    float deadzone = 0.02f;
+    // P2/01: deadzone defaults to 0.0f because the input is the policy's
+    // discrete output, not analog physical-controller noise. The previous
+    // 0.02f silently clipped small intentional EMA-ramp values.
+    float deadzone = 0.00f;
     float jitterAmount = 0.005f;
     bool humanize = false;
 

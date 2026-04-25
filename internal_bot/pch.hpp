@@ -1,7 +1,9 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 
-#define nullcheck(ptr) if (ptr == NULL || ptr == nullptr || !ptr) {return;}
+// P3/06: removed unused `nullcheck` macro. It had no `do { ... } while(0)`
+// wrapping, which made `if (cond) nullcheck(p); else foo();` silently misparse
+// the `else`. The macro had zero call sites in the codebase.
 
 #include <Windows.h>
 #include <unordered_map>
@@ -9,7 +11,6 @@
 #include <iostream>
 #include <iomanip>
 #include <functional>
-#include <iostream>
 #include <sstream>
 #include <fstream>
 #include <stdlib.h>

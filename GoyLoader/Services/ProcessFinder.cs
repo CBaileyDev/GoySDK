@@ -8,7 +8,10 @@ public static class ProcessFinder
 {
     private const byte K = 0x5A;
 
-    // Encoded with XOR K — runtime only (no full plaintext in IL string heap for naive grep).
+    // P3/05: encoded with XOR K. This defeats `strings(1)` and naive grep ONLY.
+    // It does NOT hide the strings from a memory dump, IL inspector, or any
+    // dynamic analysis. If a real threat model demands string hiding, replace
+    // with a proper packer/cipher and a wipe-after-use buffer; do not extend this.
     private static ReadOnlySpan<byte> EncProcName => // 12 bytes
         [0x08, 0x35, 0x39, 0x31, 0x3F, 0x2E, 0x16, 0x3F, 0x3B, 0x3D, 0x2F, 0x3F];
 
