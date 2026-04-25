@@ -1,85 +1,143 @@
-# P3 / 04 — `boostDiagDone_` printed only for first car with boost component
+# P3 / 04 — `boostDiagDone_` diagnostic is one-shot but has no “missing component” signal
 
 ## TL;DR
-`BotModule::boostDiagDone_` is set to `true` after the first successful boost-component log, but the gate is inside the per-car loop. If the first car in the iteration has no `BoostComponent` (e.g., demolished, mid-spawn), the flag is never set and the diag is never printed.
+The earlier diagnosis for this note was inaccurate. The current code does **not** print only for the first car in the list. It prints for the first car encountered that has a `BoostComponent`:
+
+```cpp
+if (!boostDiagDone_ && boostComp) {
+    ...
+    boostDiagDone_ = true;
+}
+```
+
+That behavior is mostly fine. The real low-priority issue is that if no car has a `BoostComponent` on early ticks, the diagnostic stays silent, so you cannot distinguish “diagnostic not reached” from “no boost component found yet.”
 
 ## Where
 - File: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`
 - Function: `BotModule::ReadGameState`
-- Lines: **728–734**
+- Diagnostic block around current lines 729-734.
+- Field declaration: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.hpp`, `boostDiagDone_`.
+
+## Correct Fix Options
+Choose one:
+
+- **Option A: Keep the diagnostic and make absence visible.**
+- **Option B: Remove the diagnostic entirely if it has served its purpose.**
+
+Do not change the current block under the assumption that it only checks the first car. It already checks every car until one with `BoostComponent` is found.
+
+## Option A — Add a “No BoostComponent Yet” Diagnostic
+This is useful if boost component wiring is still being validated.
+
+### Step A1 — Track Whether Any Car Had a Boost Component
+In `ReadGameState`, before the car loop:
 
 ```cpp
-       
-        if (!boostDiagDone_ && boostComp) {
-            Console.Write("[GoySDK] BOOST DIAG: raw=" +
-                std::to_string(boostComp->CurrentBoostAmount) +
-                " stored=" + std::to_string(snap.boost));
-            boostDiagDone_ = true;
-        }
+bool sawBoostComponentThisTick = false;
 ```
 
-## Problem
-The intent is "print boost diagnostics once per session." The execution is "print once if the first car you iterate has a boost component." For most matches this works. For a match that starts mid-replay or with a demoed car at index 0, the diag is silently skipped.
-
-## Why it matters
-This is a debug aid. When it goes missing, debugging boost-related issues becomes harder. Low priority, but easy to fix.
-
-## Root cause
-Author put the gate inside the per-car loop instead of after iterating all cars.
-
-## Fix
-
-### Option A — Print on the first car that has a boost component (hold the loop's invariant)
-The current code already does this; the issue is *when no car ever has one*. The fix is that this is acceptable — without a `BoostComponent`, there's nothing to diag. Add an outer check that prints "no boost components found" so the absence is visible:
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`. Find:
+Inside the car loop, immediately after:
 
 ```cpp
-       
-        if (!boostDiagDone_ && boostComp) {
-            Console.Write("[GoySDK] BOOST DIAG: raw=" +
-                std::to_string(boostComp->CurrentBoostAmount) +
-                " stored=" + std::to_string(snap.boost));
-            boostDiagDone_ = true;
-        }
+auto* boostComp = car->BoostComponent;
 ```
 
-(No change to that block.)
-
-After the `for (int i = 0; ... cars[i] ...)` loop closes (around line 770), add:
+add:
 
 ```cpp
-    if (!boostDiagDone_ && !cars.empty()) {
-        Console.Write("[GoySDK] BOOST DIAG: no car had a BoostComponent on this tick.");
-        boostDiagDone_ = true;
-    }
+if (boostComp) {
+    sawBoostComponentThisTick = true;
+}
 ```
 
-### Option B — Remove the diag entirely
-If the diag is no longer useful (the boost-component path has been validated), delete the block:
+Keep the existing diagnostic block:
 
 ```cpp
-       
-        if (!boostDiagDone_ && boostComp) {
-            Console.Write("[GoySDK] BOOST DIAG: raw=" +
-                std::to_string(boostComp->CurrentBoostAmount) +
-                " stored=" + std::to_string(snap.boost));
-            boostDiagDone_ = true;
-        }
+if (!boostDiagDone_ && boostComp) {
+    Console.Write("[GoySDK] BOOST DIAG: raw=" +
+        std::to_string(boostComp->CurrentBoostAmount) +
+        " stored=" + std::to_string(snap.boost));
+    boostDiagDone_ = true;
+}
 ```
 
-Delete this entirely. Also delete the field declaration in `BotModule.hpp:136` (`static bool boostDiagDone_;`) and the definition in `BotModule.cpp:70` (`bool BotModule::boostDiagDone_ = false;`), and the resets at lines 204 and 551.
+### Step A2 — Print Absence After the Loop
+After the `for (int i = 0; i < static_cast<int>(cars.size()); i++)` loop ends, add:
+
+```cpp
+if (!boostDiagDone_ && !cars.empty() && !sawBoostComponentThisTick) {
+    Console.Write("[GoySDK] BOOST DIAG: no car had a BoostComponent on this tick.");
+    boostDiagDone_ = true;
+}
+```
+
+This keeps the diagnostic one-shot. It prints either:
+
+- one actual raw/stored boost sample, or
+- one explicit “no component found” message.
+
+### Step A3 — Reset Behavior
+Leave existing resets intact:
+
+- `OnCreate` sets `boostDiagDone_ = false`.
+- `OnGameEventDestroyed` sets `boostDiagDone_ = false`.
+
+That gives one diagnostic per match/session reset.
+
+## Option B — Remove the Diagnostic Entirely
+This is better if boost reading is already trusted.
+
+Delete the block:
+
+```cpp
+if (!boostDiagDone_ && boostComp) {
+    Console.Write("[GoySDK] BOOST DIAG: raw=" +
+        std::to_string(boostComp->CurrentBoostAmount) +
+        " stored=" + std::to_string(snap.boost));
+    boostDiagDone_ = true;
+}
+```
+
+Delete the field declaration in `BotModule.hpp`:
+
+```cpp
+static bool boostDiagDone_;
+```
+
+Delete the field definition in `BotModule.cpp`:
+
+```cpp
+bool BotModule::boostDiagDone_ = false;
+```
+
+Delete the resets in:
+
+```cpp
+BotModule::OnCreate()
+BotModule::OnGameEventDestroyed()
+```
 
 ## Verification
-
 ### If Option A
-Inject in a fresh match, confirm one of two diag lines fires within the first few ticks.
+1. Build `GoySDKCore`.
+2. Start a match.
+3. Confirm exactly one of these messages appears:
+   - `[GoySDK] BOOST DIAG: raw=... stored=...`
+   - `[GoySDK] BOOST DIAG: no car had a BoostComponent on this tick.`
+4. Leave and re-enter a match; confirm one diagnostic can print again after reset.
 
 ### If Option B
-Build with `-Werror=unused-private-field` and confirm no warnings about `boostDiagDone_`.
+1. Build `GoySDKCore`.
+2. Run:
+   ```bash
+   rg -n "boostDiagDone_|BOOST DIAG" /Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK
+   ```
+   Expected: no matches.
 
-## Don't do
-Don't change the gate to `if (boostComp || true)` — that breaks the once-per-session invariant.
+## Don't Do
+- Do not claim the current code only examines the first car; it does not.
+- Do not set `boostDiagDone_ = true` before checking all cars unless you intentionally want the “no component” message.
+- Do not leave a dead `boostDiagDone_` field after deleting the diagnostic.
 
 ## Related
 None.

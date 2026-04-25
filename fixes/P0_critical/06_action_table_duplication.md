@@ -1,126 +1,214 @@
-# P0 / 06 — Action tables duplicated in two libraries with no compile-time link
+# P0 / 06 — Action tables duplicated in two libraries with no runtime contract
 
 ## TL;DR
-The discrete action table (~64 actions) is **independently re-implemented** in two places:
+The discrete action table is built independently in two places:
 
-- `repos/RLInference/src/Bot.cpp` lines 102–125 — used to decode the policy's `argmax`/`Sample` index into a controller output.
-- `internal_bot/GoySDK/ActionMask.hpp` lines 35–115 — used to build masks and to map indices back to controller outputs in BotModule.
+- `repos/RLInference/src/Bot.cpp`, `GetDiscreteActions()`, used to decode policy output index into controller commands.
+- `internal_bot/GoySDK/ActionMask.hpp`, `GetDefaultDiscreteActionTables()`, used to build masks and to map masked indices back to actions.
 
-Both happen to match today. A one-line change in either file silently re-indexes every action and rotates the policy's output by one slot. There is no `static_assert`, no shared header, no test that asserts equivalence.
+The two tables currently appear to match, but there is no runtime or compile-time contract. If either table changes, policy output index `i` can decode to different controller actions in inference vs. masking. That silently corrupts bot behavior.
+
+Fix this by making GoySDK the single owner of the action table and injecting that table into `RLInference::BotConfig`. Add mandatory dimension checks so a missing or mismatched table is a hard inference failure, not a neutral-output mystery.
 
 ## Where
-- File 1: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp` (function `GetDiscreteActions`, lines 102–125)
-- File 2: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/ActionMask.hpp` (function `GetDefaultDiscreteActionTables`, lines 35–115)
+- RLInference copy: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`, `GetDiscreteActions`, current lines around 101-125.
+- GoySDK source of truth: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/ActionMask.hpp`, `GetDefaultDiscreteActionTables`, current lines around 35-115.
+- Bot config: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/include/RLInference.hpp`, `BotConfig`.
+- Bot construction: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`, `LoadBotForSlot`, current lines around 264-286.
 
-## Problem
-The two tables are written with the same loop nesting and the same skip conditions, so they currently produce identical sequences. But:
+## Correct Fix Strategy
+Use `ActionMask.hpp` as the single source of truth because it already owns:
 
-- They live in two repos with separate review cycles.
-- The skip-rule logic (`if (boost == 1.0f && throttle != 1.0f) continue;` etc.) is non-trivial and easy to break.
-- The struct types differ (`RLInference::ActionOutput` vs `GoySDK::DiscreteAction`) — even if both lists conceptually match, a future refactor on one side won't necessarily be mirrored on the other.
+- action enumeration,
+- ground/air masks,
+- jump/boost masks,
+- game-state-specific masking rules,
+- conversion to `RLInference::ActionOutput`.
 
-The user-visible signal of drift is "the bot's actions look weird and steer when it should boost." There's no fast way to diagnose that, because both files are individually correct.
+`RLInference` should not independently know how GoySDK enumerates actions. It should receive the action table from its host and validate that the policy output dimension matches it.
 
-## Why it matters
-This is a **time bomb**. Today: works. Tomorrow: someone changes `kBinary` or adds an action variant in one place. The model still produces a logit vector of size N, the index decode still returns *some* `ActionOutput`, but the wrong one. There's no exception, no log, no visible error.
+## Step 1 — Add `discrete_actions` to `BotConfig`
+Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/include/RLInference.hpp`.
 
-## Root cause
-RLInference was extracted into a separate library to make the inference code testable in isolation. The action table got copied because the type system on the GoySDK side wanted `DiscreteAction` (with a structured mask), and the RLInference side wanted `ActionOutput` (the controller-facing shape). Nobody added a link between them.
+Find `struct BotConfig`.
 
-## Fix
-
-There are three valid resolutions; pick **option B** unless you have a reason not to.
-
-### Option A — Single source of truth in RLInference
-Move the action enumeration into `RLInference` and have GoySDK consume it. **Don't do this** because it puts game-specific action shapes in a library that's supposed to be game-agnostic.
-
-### Option B — Single source of truth in GoySDK, RLInference receives the table at construction (recommended)
-Make `RLInference::Bot` parameterized over the action table. The host injects it at construction time.
-
-### Option C — Compile-time check that the two tables match
-Keep both, add a `static_assert` that they're the same length, and a unit test that walks both and compares element-by-element.
-
-#### Option B implementation
-
-##### Step B1 — Add the action table to `BotConfig`
-
-Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/include/RLInference.hpp`. Find the `BotConfig` struct (line 24). Add this field, right after `bool use_leaky_relu = false;`:
+Add this field after `bool use_leaky_relu = false;`:
 
 ```cpp
-    /// Discrete action table the policy was trained against. The element at
-    /// index `i` is the controller output the policy intends to emit when its
-    /// argmax/sample picks index `i`. Length must match the final policy
-    /// output dimension.
-    std::vector<ActionOutput> discrete_actions{};
+/// Host-provided discrete action table. `discrete_actions[i]` is the controller
+/// output corresponding to policy logit index `i`. This must match the policy's
+/// training-time action ordering and the final policy output dimension.
+std::vector<ActionOutput> discrete_actions{};
 ```
 
-##### Step B2 — Have `Bot::forward` use the injected table instead of `GetDiscreteActions`
+No new include is needed; the header already includes `<vector>` and `ActionOutput.hpp`.
 
-In `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`, find `GetDiscreteActions` (lines 102–125) and **delete it entirely**.
+## Step 2 — Delete RLInference's Local Action Table
+Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`.
 
-Then find the line:
-```cpp
-        const auto& acts = GetDiscreteActions();
-        last_output_ = (ai >= 0 && ai < (int)acts.size()) ? acts[ai] : ActionOutput{};
-```
-(in `Bot::forward` near line 282–283; also in the new `Bot::forward(mask)` from P0/05).
-
-Replace with:
-```cpp
-        const auto& acts = config_.discrete_actions;
-        last_output_ = (ai >= 0 && ai < (int)acts.size()) ? acts[ai] : ActionOutput{};
-```
-
-##### Step B3 — Have `BotModule::LoadBotForSlot` inject the table
-
-In `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`, find the `RLInference::BotConfig botCfg(...)` construction (lines 265–275). After the construction and before `botCfg.primary_model_data = sharedData;`, add:
+Delete the whole `GetDiscreteActions()` function:
 
 ```cpp
-        // Inject the GoySDK action table — the policy was trained against this exact
-        // ordering. RLInference no longer owns its own copy (P0/06).
-        {
-            const auto& src = GetDefaultDiscreteActions();
-            botCfg.discrete_actions.reserve(src.size());
-            for (const auto& a : src) {
-                botCfg.discrete_actions.push_back(ToActionOutput(a));
-            }
-        }
+// Discrete action table (mirrors GoySDK::ActionMask.hpp exactly).
+static const std::vector<ActionOutput>& GetDiscreteActions() {
+    ...
+}
 ```
 
-`GetDefaultDiscreteActions` and `ToActionOutput(const DiscreteAction&)` are already defined in `ActionMask.hpp`, which `BotModule.cpp` already includes.
+After this deletion, `rg -n "GetDiscreteActions" repos/RLInference internal_bot` should not find the RLInference helper.
 
-##### Step B4 — Add a runtime assertion in `Bot::forward`
-
-In the existing `Bot::forward` (and the new `Bot::forward(mask)` from P0/05), at the start of the `try { torch::NoGradGuard ng; ... }` block, add:
+## Step 3 — Decode Actions From `config_.discrete_actions`
+In `Bot::forward_impl` from **P0/05**, after logits are available and `nAct` is known, add a mandatory action-table check before choosing or decoding an action:
 
 ```cpp
-        if (config_.discrete_actions.empty()) {
-            // Misconfigured caller — they didn't inject the action table.
-            return false;
-        }
+const auto& acts = config_.discrete_actions;
+if (static_cast<int>(acts.size()) != nAct) {
+    last_output_ = {};
+    last_debug_.available = false;
+    last_debug_.action_index = -1;
+    last_debug_.logits.clear();
+    return false;
+}
 ```
 
-This catches "I forgot to populate `discrete_actions`" with a hard failure rather than silent neutral output. (Optional: also assert `static_cast<int>(config_.discrete_actions.size()) == nAct` once `nAct` is known.)
+Then decode using the injected table:
 
-##### Step B5 — Verify nothing else references the deleted `GetDiscreteActions`
-
-```bash
-grep -rn "GetDiscreteActions" /Users/carterbarker/Documents/GoySDK/repos/ /Users/carterbarker/Documents/GoySDK/internal_bot/
+```cpp
+last_output_ = (ai >= 0 && ai < static_cast<int>(acts.size()))
+    ? acts[static_cast<size_t>(ai)]
+    : ActionOutput{};
 ```
-Should be zero hits. (`GetDefaultDiscreteActions` is the GoySDK side and is fine.)
+
+If **P0/05** is not applied yet, add this same check to the existing `Bot::forward()` after `nAct` is computed and before action selection. Do not leave action-table-size validation as optional.
+
+## Step 4 — Inject the Table From `BotModule::LoadBotForSlot`
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`.
+
+Inside `LoadBotForSlot`, after constructing `botCfg` and before setting model data is fine. The current construction area is around:
+
+```cpp
+RLInference::BotConfig botCfg(
+    RLInference::BotType::GigaLearn,
+    "",
+    "",
+    slot.config.sharedHeadSizes,
+    slot.config.tickSkip,
+    false,
+    slot.config.GetExpectedObsCount(),
+    slot.config.policySizes,
+    slot.config.useLeakyRelu
+);
+botCfg.primary_model_data = sharedData;
+```
+
+Insert:
+
+```cpp
+{
+    const auto& src = GetDefaultDiscreteActions();
+    botCfg.discrete_actions.reserve(src.size());
+    for (const auto& action : src) {
+        botCfg.discrete_actions.push_back(ToActionOutput(action));
+    }
+}
+```
+
+`BotModule.cpp` already includes `ActionMask.hpp`, so `GetDefaultDiscreteActions` and `ToActionOutput(const DiscreteAction&)` are available.
+
+## Step 5 — Validate Mask and Action Table Dimensions Together
+When **P0/05** is also applied, `Bot::forward_impl` should validate:
+
+1. `config_.discrete_actions.size() == nAct`.
+2. If a mask was provided, `actionMask.size() == nAct`.
+3. The mask has at least one allowed action.
+
+The validation order should be:
+
+```cpp
+const int nAct = static_cast<int>(flat.numel());
+
+const auto& acts = config_.discrete_actions;
+if (static_cast<int>(acts.size()) != nAct) {
+    // missing host action table or model/table mismatch
+    clear debug/output;
+    return false;
+}
+
+if (actionMask && static_cast<int>(actionMask->size()) != nAct) {
+    // model/table/mask mismatch
+    clear debug/output;
+    return false;
+}
+
+if (actionMask) {
+    // apply mask and reject all-zero mask
+}
+```
+
+Do not apply the mask before proving the action table matches the policy dimension. A model/action-table mismatch is a configuration bug, not a mask bug.
+
+## Step 6 — Add Host-Side Sanity Logging
+In `LoadBotForSlot`, after table injection and before constructing `RLInference::Bot`, add a debug-only or early-load diagnostic if needed:
+
+```cpp
+if (botCfg.discrete_actions.empty()) {
+    Console.Error("[GoySDK] Discrete action table is empty; refusing to load bot.");
+    slot.modelIdx = -1;
+    modelLoading_ = false;
+    return false;
+}
+```
+
+Do not only log and continue. An empty table means every action index would decode to neutral.
+
+Optional one-time diagnostic:
+
+```cpp
+Console.Write("[GoySDK] Discrete action table size: " + std::to_string(botCfg.discrete_actions.size()));
+```
+
+If added, remove or gate it after verification so it does not spam every model reload.
+
+## Step 7 — Remove Dead Conversion Use If P0/05 Removes Post-Hoc Masking
+After **P0/05**, the live path should no longer call:
+
+```cpp
+ToActionOutput(maskedActionIndex)
+```
+
+The `ToActionOutput(int)` overload in `ActionMask.hpp` can remain for diagnostics/tests. The important part is that live inference decodes through `config_.discrete_actions`.
 
 ## Verification
+1. Build `RLInference`.
+2. Build `GoySDKCore`.
 
-1. **Build** — both libraries.
-2. **Sanity-check the table size at runtime** — temporarily add `Console.Write("[GoySDK] action table size: " + std::to_string(botCfg.discrete_actions.size()));` and confirm it matches the model's output dim.
-3. **Behavioral regression** — record `policyDebug.action_index` and `last_output_` for 100 ticks before and after the change with the same observation. They should be identical (because the table contents haven't changed, only the *ownership* has).
-4. **Drift simulation** — temporarily add a sentinel action `built.actions.push_back({...})` *only* in `ActionMask.hpp::GetDefaultDiscreteActionTables`. Confirm that the size mismatch is now caught (either by the assertion in B4 or by the existing logits-vs-mask size check at `BotModule.cpp:878`).
+3. Search:
+   ```bash
+   rg -n "GetDiscreteActions" /Users/carterbarker/Documents/GoySDK/repos /Users/carterbarker/Documents/GoySDK/internal_bot
+   ```
+   Expected: no RLInference-local `GetDiscreteActions` helper.
 
-## Don't do
+4. Runtime table-size sanity:
+   - Temporarily log `botCfg.discrete_actions.size()`.
+   - Confirm it matches the policy output dimension printed in early inference debug (`policyDebug.logits.size()`).
 
-- Do not edit `ActionMask.hpp` to import from `RLInference.hpp` — that creates a circular dependency.
-- Do not ship Option C alone (compile-time check). It catches *some* drift (size differences, type mismatches) but not the most likely class of bug (someone reorders a loop).
-- Do not turn the action table into a runtime-loaded JSON. The current static array is correct; it just needs one owner.
+5. Empty-table failure:
+   - Temporarily comment out the injection block.
+   - Confirm `Bot::forward` returns false and the host applies neutral input, instead of silently emitting neutral from an out-of-range action index.
+
+6. Drift simulation:
+   - Temporarily add or remove one action from `GetDefaultDiscreteActionTables()`.
+   - Confirm model output/action-table mismatch is caught by `forward_impl` and logged through the failure path.
+
+7. Behavior regression:
+   - With the table unchanged, record `policyDebug.action_index` and controller output before and after the refactor for the same observation.
+   - They should match exactly.
+
+## Don't Do
+- Do not keep both action tables and add only a size check. Reordering bugs can keep the same size and still corrupt behavior.
+- Do not move `ActionMask.hpp` into `RLInference`; it depends on GoySDK-specific state.
+- Do not load the action table from JSON at runtime. The static C++ table is fine; it just needs one owner.
+- Do not allow missing `discrete_actions` to fall back to an internal default. That reintroduces two sources of truth.
 
 ## Related
-- **P0/05** — same `Bot::forward` is being modified to take a mask. Do P0/05 first (the mask change is more invasive) and apply this on top.
+- **P0/05** — mask-before-sampling should be applied in the same implementation pass.

@@ -1,130 +1,201 @@
 # P0 / 01 — DEFLATE'd model files load as a silent no-op bot
 
 ## TL;DR
-The ZIP parser used to extract TorchScript model weights only handles entries with `compression == 0` (STORED). Any DEFLATE'd entry is silently skipped, the layer count comes up short, but the bot is still presented to the user as "loaded" and emits neutral controller output forever.
+The TorchScript ZIP reader in `repos/RLInference/src/Bot.cpp` only accepts ZIP entries whose compression method is `0` (`STORED`). Normal Torch/PyTorch archives may contain `archive/data/<n>` entries compressed with method `8` (`DEFLATE`). The current parser silently skips those entries, `LoadMLP` fails, `Bot` enters stub mode, and because `Bot::is_initialized()` currently lies (see **P0/02**) the host reports the model as loaded while the car outputs neutral controls forever.
+
+This fix must make the ZIP reader support raw ZIP DEFLATE entries, make unsupported compression fail visibly through the normal load-failure path, and keep all offset validation overflow-safe. Apply **P1/06** in the same editing pass because the same code is being touched.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`
-- Function: anonymous namespace `ExtractDataEntries`
-- Approximate line: **89** (`if (compression != 0) continue;`)
+- ZIP parser: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`, anonymous `ExtractDataEntries`, current lines around 23-94.
+- Compression skip: `if (compression != 0) continue;`.
+- Stub-mode visibility: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`, `Bot::is_initialized()` current lines around 241-244.
 
-## Problem
-TorchScript `.pt` / `.lt` archives commonly use DEFLATE (`compression == 8`) for tensor blobs unless the export code was specifically configured for STORED. The current parser:
+## Current Code Shape
+The parser:
+1. Finds the End of Central Directory.
+2. Walks central-directory records.
+3. Selects entries named `archive/data/<number>`.
+4. Jumps to the matching local file header.
+5. Copies the raw file bytes only when `compression == 0`.
+
+The relevant current block is:
+
 ```cpp
+// Use the size from the Central Directory (always correct).
+if (rawData + compSize > end) continue;
 if (compression != 0) continue;   // only STORED
+
 out[idx].assign(rawData, rawData + compSize);
 ```
-…drops the entry. `LoadMLP` then fails to find the next `(weights, bias)` pair and `LoadMLP` returns false. The constructor catches this, sets `impl_->ready = false`, and the bot enters "stub mode."
 
-Because **P0/02** (`is_initialized` lies) returns true regardless, `BotModule::LoadBotForSlot` thinks the model loaded fine, and every call to `forward()` returns the early-out neutral output at `Bot.cpp:251` (`last_output_ = {};`).
+That last line is valid for stored entries only. For DEFLATE entries, `rawData` points at compressed bytes and must be inflated into `uncompSize` bytes before the tensor byte vector is stored.
 
-## Why it matters
-Users export a new model, drop it into the resources, ship it, and the bot does nothing — no error in the console, no log entry, just a stationary car. The `Console.Notify(... Loaded ...)` line at `BotModule.cpp:305` even prints success.
+## Correct Fix Strategy
+Use a small, vendored DEFLATE implementation and call the raw-DEFLATE API. Do **not** use a zlib-wrapper API such as `uncompress()` or `mz_uncompress()` for ZIP entry payloads. ZIP method 8 stores raw DEFLATE streams without a zlib header.
 
-## Root cause
-The author wrote a minimal STORED-only parser because their reference TorchScript files happened to be uncompressed. There is no validation step that would have caught this for any other model. Compounded by P0/02 hiding the failure.
+Recommended implementation: vendor `miniz` and use `tinfl_decompress_mem_to_mem(...)` with flags `0`.
 
-## Fix
+## Step 1 — Vendor `miniz`
+Add the single-source miniz release files:
 
-### Step 1 — Add zlib (or miniz) dependency
-
-The project already links `LibTorch`, which bundles `libzstd` but **not** `zlib` as a public link target. Use **miniz** because it is a single-file, header-only ZIP/DEFLATE library that can be vendored into `repos/RLInference` with no build-system surgery.
-
-Add a vendored `miniz.h` and `miniz.c` from <https://github.com/richgel999/miniz> (use the single-source release, latest v3.x). Place them at:
-```
+```text
 /Users/carterbarker/Documents/GoySDK/repos/RLInference/third_party/miniz/miniz.h
 /Users/carterbarker/Documents/GoySDK/repos/RLInference/third_party/miniz/miniz.c
 ```
 
-Then update `/Users/carterbarker/Documents/GoySDK/repos/RLInference/CMakeLists.txt` to add the source and include path:
+Use an upstream miniz v3.x release. Keep the upstream license header intact.
+
+## Step 2 — Wire `miniz` into RLInference
+Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/CMakeLists.txt`.
+
+Current file has:
+
 ```cmake
-target_sources(RLInference PRIVATE third_party/miniz/miniz.c)
-target_include_directories(RLInference PRIVATE third_party/miniz)
+file(GLOB_RECURSE RLINFERENCE_SOURCES "src/*.cpp")
+
+add_library(RLInference STATIC ${RLINFERENCE_SOURCES})
+
+target_include_directories(RLInference PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 ```
-(Insert these next to existing `target_sources` / `target_include_directories` calls. If those calls don't exist, search the file for the `add_library(RLInference ...)` declaration and add the lines immediately after it.)
 
-### Step 2 — Inflate DEFLATE entries in `ExtractDataEntries`
+Replace or extend it so `miniz.c` is compiled as C/C++ compatible source and the include directory is private:
 
-Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`. Add at the top of the file, with the other includes:
+```cmake
+file(GLOB_RECURSE RLINFERENCE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+
+add_library(RLInference STATIC
+    ${RLINFERENCE_SOURCES}
+    third_party/miniz/miniz.c
+)
+
+target_include_directories(RLInference
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz
+)
+```
+
+If your toolchain compiles `.c` files as C and warns on Torch/C++ flags, it is also acceptable to rename `miniz.c` to `miniz.cpp` after verifying the upstream file supports C++ compilation. Prefer the direct `.c` path first.
+
+## Step 3 — Add Includes
+Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`.
+
+Add these includes near the existing standard-library includes:
+
+```cpp
+#include <limits>
+#include <stdexcept>
+```
+
+Add the miniz include after the Torch/RLInference includes:
+
 ```cpp
 #include "miniz.h"
 ```
 
-Find this exact block (around line 87–92):
-```cpp
-        // Use the size from the Central Directory (always correct).
-        if (rawData + compSize > end) continue;
-        if (compression != 0) continue;   // only STORED
+`<limits>` is useful for later mask work and defensive values. `<stdexcept>` is useful if you decide to convert malformed critical structures into visible load failure instead of silently skipping them.
 
-        out[idx].assign(rawData, rawData + compSize);
+## Step 4 — Replace Stored-Only Copy With Stored/DEFLATE Handling
+After applying the overflow-safe checks from **P1/06**, replace the compression block with this exact shape:
+
+```cpp
+std::vector<uint8_t> bytes;
+
+if (compression == 0) {
+    // STORED: central-directory compressed and uncompressed sizes must agree.
+    if (compSize != uncompSize) {
+        continue;
     }
+    bytes.assign(rawData, rawData + compSize);
+} else if (compression == 8) {
+    // ZIP method 8 uses raw DEFLATE, not zlib-wrapped DEFLATE.
+    bytes.resize(uncompSize);
+    const size_t outBytes = tinfl_decompress_mem_to_mem(
+        bytes.data(),
+        bytes.size(),
+        rawData,
+        compSize,
+        0);
+
+    if (outBytes == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED ||
+        outBytes != static_cast<size_t>(uncompSize)) {
+        continue;
+    }
+} else {
+    // Unsupported ZIP compression method. Skip the entry. If required model
+    // tensors are skipped, LoadMLP returns false and P0/02 surfaces the failure.
+    continue;
+}
+
+out[idx] = std::move(bytes);
 ```
 
-Replace it with:
-```cpp
-        // Use the size from the Central Directory (always correct).
-        if (rawData + compSize > end) continue;
+Do not use this incorrect pattern:
 
-        if (compression == 0) {
-            // STORED — copy raw bytes directly.
-            out[idx].assign(rawData, rawData + compSize);
-        } else if (compression == 8) {
-            // DEFLATE — inflate via miniz into a fresh buffer of uncompSize bytes.
-            std::vector<uint8_t> inflated(uncompSize);
-            mz_ulong dstLen = uncompSize;
-            int status = mz_uncompress2(
-                inflated.data(), &dstLen,
-                rawData, reinterpret_cast<mz_ulong*>(&compSize));
-            if (status != MZ_OK || dstLen != uncompSize) continue;
-            out[idx] = std::move(inflated);
-        } else {
-            // Unsupported compression method — skip but DO NOT silently mark success.
-            continue;
-        }
-    }
+```cpp
+mz_uncompress(...);
 ```
 
-> ⚠️ `mz_uncompress2` expects the compressed stream to include the zlib wrapper. ZIP entries are **raw** DEFLATE without the zlib header. Use `mz_inflate` directly via `tinfl_decompress_mem_to_mem` instead. Replace the `else if` block above with:
-> ```cpp
-> } else if (compression == 8) {
->     std::vector<uint8_t> inflated(uncompSize);
->     size_t outBytes = tinfl_decompress_mem_to_mem(
->         inflated.data(), uncompSize,
->         rawData, compSize,
->         TINFL_FLAG_PARSE_ZLIB_HEADER ? 0 : 0);  // raw DEFLATE — no zlib header flag
->     if (outBytes == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED || outBytes != uncompSize) continue;
->     out[idx] = std::move(inflated);
-> }
-> ```
-> The `TINFL_FLAG_PARSE_ZLIB_HEADER` flag must be **omitted** (i.e., flags=0) for raw DEFLATE inside ZIP entries.
+`mz_uncompress` expects zlib-wrapped data. ZIP file payloads for method 8 are raw DEFLATE streams.
 
-### Step 3 — Add a load-time error log so this can never happen silently again
+## Step 5 — Keep Failure Visible
+This fix is only complete when **P0/02** is also applied:
 
-In `Bot::Bot` constructor, **after** P0/02 is applied (`is_initialized` returns honest value), the caller `BotModule::LoadBotForSlot` already logs an error path. So no additional change here is needed if P0/02 ships in the same release.
-
-If P0/02 is **not** shipping yet, add this inside the `catch (...)` at `Bot.cpp:231-236`:
 ```cpp
-} catch (...) {
-    impl_->shared.clear();
-    impl_->policy.clear();
-    impl_->ready = false;
-    // TODO: pipe an error message back to the host. For now, force a stderr write.
-    std::fprintf(stderr, "RLInference: Bot construction threw, entering stub mode.\n");
+bool Bot::is_initialized() const {
+    return impl_ != nullptr && impl_->ready;
 }
 ```
 
+Without P0/02, malformed, unsupported, or failed DEFLATE loads can still become invisible stub-mode bots.
+
+Do not add a success log from inside `RLInference`. The host already has the right call-site error path at `BotModule::LoadBotForSlot` once `is_initialized()` is honest.
+
+## Step 6 — Expected Behavior After Fix
+- STORED Torch archives still load.
+- DEFLATE Torch archives load.
+- Unsupported methods such as BZIP2 do not crash and do not report as loaded.
+- Corrupt DEFLATE streams do not crash and do not report as loaded.
+- All failure modes produce the existing host-side error once P0/02 is applied.
+
 ## Verification
+1. Build RLInference:
+   ```bash
+   cmake --build /Users/carterbarker/Documents/GoySDK/repos/RLInference/build
+   ```
+   If this project does not already have a configured build directory, configure it with the same Torch environment used by `internal_bot`.
 
-1. **Unit test** — build `repos/RLInference` standalone (it has its own `CMakeLists.txt`). Add a test that loads a known DEFLATE'd `.pt` file and asserts `bot.is_initialized()` and that `forward()` produces a non-zero `logits.size()`.
-2. **Integration test** — re-export one of the existing models with `torch.jit.save(..., _use_new_zipfile_serialization=True)` and the default DEFLATE; replace the embedded resource; build the DLL; inject; verify the bot moves.
-3. **Negative test** — produce a ZIP with `compression = 12` (BZIP2) and confirm the `continue` branch is hit and the bot enters stub mode (combined with P0/02 the user will see an error).
+2. Build the DLL project:
+   ```bash
+   cmake --build /Users/carterbarker/Documents/GoySDK/internal_bot/build
+   ```
 
-## Don't do
+3. Positive model test:
+   - Produce or locate a TorchScript ZIP where `archive/data/<n>` entries are DEFLATE-compressed.
+   - Embed it or temporarily load it through the resource path.
+   - Confirm `Bot::is_initialized()` returns true and `[GoySDK] Slot 0: Loaded ...` is printed.
 
-- Do not switch the parser to use LibTorch's `torch::jit::load`. That pulls in the full IR module loader and breaks the "minimal embedded MLP weights" design.
-- Do not use `mz_uncompress` on raw DEFLATE — see the warning above.
-- Do not silently assume STORED-only models exist. Old releases of `torch.save` default to ZIP_DEFLATED.
+4. STORED regression:
+   - Test an existing known-good model from the current resources.
+   - Confirm behavior is unchanged.
+
+5. Negative corrupt-DEFLATE test:
+   - Flip one byte inside a compressed `archive/data/<n>` entry.
+   - Confirm the bot does not load and the host prints the model initialization failure.
+
+6. Unsupported-compression test:
+   - Create a ZIP entry with method 12 or another unsupported method.
+   - Confirm there is no crash and load fails visibly.
+
+## Don't Do
+- Do not switch to `torch::jit::load`. This code intentionally extracts raw MLP tensors from embedded archives without loading the full TorchScript module.
+- Do not use `mz_uncompress`, `uncompress`, or any API that requires a zlib header.
+- Do not leave `Bot::is_initialized()` returning `impl_ != nullptr`.
+- Do not “fix” by requiring all model exports to be STORED. The loader should accept normal Torch ZIPs.
 
 ## Related
-- **P0/02** — without that fix, this fix only papers over half the problem.
-- **P1/06** — same parser, integer overflow on offsets. Fix in the same pass.
+- **P0/02** — required so load failures are no longer hidden.
+- **P1/06** — same parser needs overflow-safe bounds checks before decompression is safe.

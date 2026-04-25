@@ -1,29 +1,54 @@
-# P2 / 01 — Humanizer deadzone snaps model output to zero
+# P2 / 01 — Humanizer deadzone is applied to smoothed output instead of input intent
 
 ## TL;DR
-`Humanizer::Smooth` applies a deadzone (`fabsf(val) < dead_` → `val = 0.f`) **after** smoothing. The discrete action table emits values from {-1, 0, 1}, so an intentional `+1.0f` from the policy can be exponentially-smoothed to `prev + 0.2 * (1.0 - prev)` and, if the previous output was 0, the first sample is `0.2` — which passes the default `0.08` deadzone. But with `smoothFactor = 0.80f` (the default in the constructor) `alpha = 0.20f` the math is:
-- `Smooth(1.0, prev=0)` → `0 + 0.2 * 1 = 0.2` → not deadzoned (0.2 > 0.08) → fine.
-- `Smooth(0.5, prev=0)` → `0 + 0.2 * 0.5 = 0.1` → not deadzoned, fine.
-- `Smooth(-0.1, prev=0)` → `0 + 0.2 * -0.1 = -0.02` → DEADZONED to 0.
+`Humanizer::Smooth` applies the deadzone after exponential smoothing:
 
-For the discrete action table whose ground-control yaw is in `{-1, 0, 1}`, this is fine for the extremes. But the `pitch` and `roll` channels for **air actions** can produce intentional small magnitudes when the action table is consulted *and* when the policy emits a fractional value (e.g., from the `bo` substituted-as-throttle trick at `ActionMask.hpp:73`). Combined with smoothing, those small intentional values can clip to 0.
+```cpp
+float val = prev + (target - prev) * alpha;
+if (fabsf(val) < dead_) val = 0.f;
+```
 
-The bigger issue: the deadzone exists to mask analog-controller noise around the resting position. The policy outputs **discrete** values; there is no noise to mask. The deadzone only ever degrades intent.
+That means the humanizer can erase small transitional outputs created by smoothing even when the target is intentional. This is not catastrophic for the current mostly discrete action table (`-1, 0, 1` analog values), but it is still the wrong semantic layer: a deadzone is for filtering noisy input intent, not for clipping the output of the smoother.
+
+Fix by applying the deadzone to `target` before smoothing, and set the default configured deadzone to `0.0f` unless the user explicitly opts in.
 
 ## Where
 - File: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Humanizer.hpp`
-- Function: `Humanizer::Smooth`
-- Lines: **16–32**
+- Function: `Humanizer::Smooth`, current lines around 16-32.
+- Constructor default: same file, current line around 11.
+- User config default: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Config.hpp`, current line around 102.
+- Call site: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`, `RunSlotInferenceTick`, current lines around 941-943.
+
+## What Is Actually Wrong
+The old note overstated this for the current action table. Most table outputs are `-1`, `0`, or `1`, so the default smoothing step often produces values above the current default deadzone.
+
+The real issue is still valid:
+
+1. The humanizer receives bot output, not noisy physical-controller input.
+2. Smoothing can turn an intentional non-zero target into a smaller transitional value.
+3. Deadzoning after smoothing clips that transitional value and changes the smoothing curve.
+4. There are two conflicting defaults: `Humanizer` constructor uses `0.08f`, `Config` uses `0.02f`.
+
+The safest behavior for model output is no deadzone by default.
+
+## Correct Fix Strategy
+Apply deadzone to the requested target first, then smooth toward that target:
+
+- If the target itself is tiny, treat it as intentional zero.
+- If the target is meaningfully non-zero, preserve the smoother's gradual transition even if the first few smoothed values are small.
+
+## Step 1 — Update `Humanizer::Smooth`
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Humanizer.hpp`.
+
+Replace:
 
 ```cpp
 float Smooth(float target, float& prev) const {
     float alpha = 1.f - smooth_;
     float val = prev + (target - prev) * alpha;
 
-   
     if (fabsf(val) < dead_) val = 0.f;
 
-   
     if (fabsf(val) > 0.95f && jitter_ > 0.f) {
         val += dist_(rng_) * jitter_;
         if (val >  1.f) val =  1.f;
@@ -35,60 +60,18 @@ float Smooth(float target, float& prev) const {
 }
 ```
 
-Default constructor (line 11): `Humanizer(float smoothFactor = 0.80f, float deadzone = 0.08f, float jitter = 0.015f)`.
-
-Default `Config` (line 102 of `Config.hpp`): `float deadzone = 0.02f;` (more conservative).
-
-## Problem
-1. The deadzone applies to the smoothed (and thus already attenuated) value, not the input.
-2. The 0.08 default in the constructor and the 0.02 default in `Config` disagree — whichever the caller doesn't specify wins.
-3. For discrete-output policies, "deadzone the output" is conceptually incoherent.
-
-## Why it matters
-The "humanizer" is enabled by `Config::humanize` (default false). When users *do* enable it (e.g., to make the bot look more human in casual play), they get worse-than-stochastic behavior — small intended yaw/roll inputs get dropped, the bot hesitates on small corrections.
-
-## Root cause
-Inverted reasoning: the deadzone makes sense for **input from a real controller** (where ~0.05 magnitude noise is normal). It makes no sense for **output toward a virtual controller** (where the source is a clean discrete signal).
-
-## Fix
-
-### Step 1 — Apply the deadzone to the *target*, not the smoothed value
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Humanizer.hpp`. Find:
+with:
 
 ```cpp
 float Smooth(float target, float& prev) const {
-    float alpha = 1.f - smooth_;
-    float val = prev + (target - prev) * alpha;
-
-   
-    if (fabsf(val) < dead_) val = 0.f;
-
-   
-    if (fabsf(val) > 0.95f && jitter_ > 0.f) {
-        val += dist_(rng_) * jitter_;
-        if (val >  1.f) val =  1.f;
-        if (val < -1.f) val = -1.f;
+    if (std::fabs(target) < dead_) {
+        target = 0.f;
     }
-
-    prev = val;
-    return val;
-}
-```
-
-Replace with:
-
-```cpp
-float Smooth(float target, float& prev) const {
-    // Deadzone the TARGET, not the smoothed value. The smoothed value can be
-    // smaller than `target` after one EMA step, so deadzoning post-smoothing
-    // erases small but intentional discrete commands from the policy.
-    if (fabsf(target) < dead_) target = 0.f;
 
     const float alpha = 1.f - smooth_;
     float val = prev + (target - prev) * alpha;
 
-    if (fabsf(val) > 0.95f && jitter_ > 0.f) {
+    if (std::fabs(val) > 0.95f && jitter_ > 0.f) {
         val += dist_(rng_) * jitter_;
         if (val >  1.f) val =  1.f;
         if (val < -1.f) val = -1.f;
@@ -99,45 +82,86 @@ float Smooth(float target, float& prev) const {
 }
 ```
 
-### Step 2 — Reconcile the default deadzone
+The file already includes `<cmath>`. Prefer `std::fabs` over `fabsf` if the surrounding code compiles cleanly with it; otherwise `fabsf` is acceptable.
 
-There are two defaults in conflict: 0.08 in `Humanizer` constructor (line 11), 0.02 in `Config` (line 102 of Config.hpp). Pick **0.0** — the discrete-output policy genuinely never benefits from a deadzone.
+## Step 2 — Reconcile Defaults
+Edit `Humanizer.hpp`.
 
-In `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Humanizer.hpp`, change line 11:
+Change constructor default:
+
 ```cpp
 Humanizer(float smoothFactor = 0.80f, float deadzone = 0.08f, float jitter = 0.015f)
 ```
+
 to:
+
 ```cpp
 Humanizer(float smoothFactor = 0.80f, float deadzone = 0.00f, float jitter = 0.015f)
 ```
 
-In `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Config.hpp`, change line 102:
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/Config.hpp`.
+
+Change:
+
 ```cpp
-    float deadzone = 0.02f;
+float deadzone = 0.02f;
 ```
+
 to:
+
 ```cpp
-    float deadzone = 0.00f;  // Discrete policy output doesn't benefit from output deadzoning.
+float deadzone = 0.00f;
 ```
 
-If a user wants a deadzone for hand-off testing, they can still set it explicitly.
+If the GUI exposes deadzone as a tuning control, keep the control. This change only changes the default.
 
-### Step 3 — (Optional) Skip humanizing the binary buttons
+## Step 3 — Do Not Touch Binary Buttons
+`Humanizer::ProcessAnalog` only modifies:
 
-`Humanizer::ProcessAnalog` only takes the analog channels (`throttle, steer, pitch, yaw, roll`), so `jump`, `boost`, `handbrake` aren't touched. Good. No change needed.
+- throttle,
+- steer,
+- pitch,
+- yaw,
+- roll.
+
+It does not modify:
+
+- jump,
+- boost,
+- handbrake.
+
+Leave that boundary intact.
+
+## Step 4 — Pair With State Reset
+Apply **P2/02** in the same pass. Changing smoothing semantics does not fix stale `prev_` state when a slot is switched back to human/bot. The reset fix is separate and still needed.
 
 ## Verification
+1. Build `GoySDKCore`.
 
-1. **Build** — `cmake --build`.
-2. **Behavioral test** — enable `Config::humanize`, give the bot a low-magnitude yaw target (e.g., a small in-air correction), confirm the output reaches the controller. Pre-fix: corrections to ~0.1 magnitude get dropped after smoothing. Post-fix: small corrections survive.
-3. **Regression** — disable `humanize`, confirm bot behavior is identical (`ProcessAnalog` is only called when `slot.config.humanize` is true at `BotModule.cpp:941-943`).
+2. Unit-style check:
+   - Configure `Humanizer h(0.80f, 0.08f, 0.0f)`.
+   - Start with `prev = 0`.
+   - `Smooth(1.0f, prev)` should return `0.2f`.
+   - `Smooth(0.05f, prev)` should target zero because the target is inside deadzone.
 
-## Don't do
+3. Default-config check:
+   - Confirm `Config.deadzone` starts at `0.0f`.
+   - Confirm `Humanizer()` starts with `dead_ == 0.0f`.
 
-- Do not delete the deadzone parameter entirely. Some future caller may want to use the humanizer on actual analog input, where deadzoning makes sense.
-- Do not move the deadzone *after* the smoothing AND keep applying it pre-clip. That's the current bug.
-- Do not raise `smoothFactor` to compensate (e.g., to 0.9) — that just slows the bot's response without fixing the deadzone semantics.
+4. Runtime check:
+   - Enable humanize.
+   - Confirm analog outputs ramp smoothly instead of staying at zero until the smoothed value crosses the deadzone threshold.
+
+5. Regression check:
+   - Disable humanize.
+   - Confirm bot controls are unchanged because `ProcessAnalog` is skipped.
+
+## Don't Do
+- Do not delete the deadzone parameter entirely. It may still be useful as an explicit user tuning control.
+- Do not apply deadzone both before and after smoothing.
+- Do not raise smoothing to hide deadzone artifacts. That makes response slower without fixing semantics.
+- Do not humanize binary buttons in this fix.
 
 ## Related
-- **P2/02** — `Humanizer.Reset()` is not called on model swap. The smoothing state can carry stale values into a freshly-loaded model. Same file.
+- **P2/02** — reset humanizer state on slot/model transitions.
+- **P0/05** — masked action selection should be verified before judging humanizer behavior.

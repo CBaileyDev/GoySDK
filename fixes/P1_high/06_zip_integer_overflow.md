@@ -1,140 +1,311 @@
-# P1 / 06 — ZIP-parser bounds checks use `a + b > c` (overflow)
+# P1 / 06 — ZIP-parser bounds checks use overflowing offset and pointer arithmetic
 
 ## TL;DR
-The minimal ZIP parser in `repos/RLInference/src/Bot.cpp` validates buffer offsets with `localOffset + 30 > zipSize` and `rawData + compSize > end`. Both forms allow integer overflow on the LHS, after which the check passes for inputs that should be rejected. Combined with `compSize` and `localOffset` being attacker-controlled (in any future scenario where ZIPs come from outside the trusted embedded resources), this is an out-of-bounds-read primitive.
+The minimal ZIP parser in `repos/RLInference/src/Bot.cpp` validates several attacker-controlled offsets with expressions such as `localOffset + 30 > zipSize` and `rawData + compSize > end`. Those forms can overflow before the comparison happens. Some of the earlier proposed fixes still performed pointer arithmetic before proving the pointer was inside the buffer, which is not safe enough.
+
+Rewrite the parser's central-directory and local-header validation to use integer offsets and subtraction-form bounds checks. Only convert an offset to a pointer after proving the whole range is inside `[0, zipSize)`.
 
 ## Where
 - File: `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`
 - Function: anonymous `ExtractDataEntries`
-- Lines: **76** (`if (localOffset + 30 > zipSize) continue;`), **88** (`if (rawData + compSize > end) continue;`)
+- Current risky checks:
+  - `for (const uint8_t* s = end - 22; s >= base; --s)` — pointer loop can step before `base`.
+  - `if (cdOffset >= zipSize) return false;` — only checks start, not central-directory record ranges.
+  - `for (... && cd + 46 <= end; ...)` — pointer addition before robust validation.
+  - `if (localOffset + 30 > zipSize) continue;` — 32-bit overflow.
+  - `const uint8_t* rawData = local + 30 + localFnLen + localExLen;` — pointer computed before range validation.
+  - `if (rawData + compSize > end) continue;` — pointer addition can overflow.
 
-## Problem
-1. `localOffset` is `uint32_t`. If `localOffset == 0xFFFFFFFE`, then `localOffset + 30 == 0x0000001C` (wrap), which is less than any reasonable `zipSize`. The check passes. The subsequent `local = base + localOffset` reads ~4 GB past `base`, which on x64 may map to allocator metadata, on x86 overflows the address space and produces an access violation.
-2. `rawData` is a pointer; `compSize` is `uint32_t`. `rawData + compSize` is computed in `size_t`. If `compSize == 0xFFFFFFFF` and `rawData` is high in the address space, the addition wraps and is less than `end`. The subsequent `assign(rawData, rawData + compSize)` reads 4 GB.
-3. The same pattern exists for `cdOffset` at line 43 (`if (cdOffset >= zipSize) return false;`) — that one is OK because it's a `>=` direct comparison, not an addition.
+## Why It Matters
+Today the model archives are embedded resources, so the immediate risk is mostly malformed-resource crashes. But the code is exactly where a future “load model from disk” or “download model update” feature would land. If that happens with the current parser, a crafted ZIP can turn offset metadata into out-of-bounds reads or access violations.
 
-## Why it matters
-Today the ZIPs are embedded resources baked into the DLL, so the inputs are trusted. The moment someone adds "load model from disk" or "stream model from network" (an obvious next feature), this becomes an OOB-read sink that an attacker can hit by crafting a ZIP with sentinel offset values.
+Even with trusted resources, robust parsing is required before adding **P0/01** DEFLATE support because decompression code must never be handed invalid source ranges.
 
-## Root cause
-Author wrote the checks the natural-language way ("offset plus header size must not exceed file size") without thinking about overflow on the unsigned types being summed.
+## Correct Fix Strategy
+Use these rules throughout `ExtractDataEntries`:
 
-## Fix
+1. Keep positions as `size_t` offsets until validation is complete.
+2. Use `if (offset > size - needed)` style checks, guarded by `size >= needed`.
+3. Validate central-directory variable-length fields before constructing strings.
+4. Validate local-header variable-length fields before computing the data offset.
+5. Only build pointers after the integer range is proven valid.
+6. Avoid pointer loops that compare `s >= base` after decrementing; use integer reverse loops.
 
-### Step 1 — Rewrite both checks as subtractions
+## Step 1 — Add Small Helpers
+Inside the anonymous namespace in `Bot.cpp`, above `ExtractDataEntries`, add helpers like these:
 
-Edit `/Users/carterbarker/Documents/GoySDK/repos/RLInference/src/Bot.cpp`. Find:
 ```cpp
-        // Jump to the local file header to find the actual data bytes.
-        if (localOffset + 30 > zipSize) continue;
+static bool HasRange(size_t total, size_t offset, size_t length) {
+    return offset <= total && length <= total - offset;
+}
+
+static uint16_t ReadU16(const uint8_t* p) {
+    uint16_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static uint32_t ReadU32(const uint8_t* p) {
+    uint32_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+```
+
+`HasRange` is the important part. It avoids `offset + length` overflow.
+
+## Step 2 — Rewrite EOCD Scan With Integer Offsets
+Replace the pointer-based EOCD scan:
+
+```cpp
+const uint8_t* eocd = nullptr;
+for (const uint8_t* s = end - 22; s >= base; --s) {
+    uint32_t sig;
+    std::memcpy(&sig, s, 4);
+    if (sig == 0x06054B50) { eocd = s; break; }
+}
+if (!eocd) return false;
+```
+
+with:
+
+```cpp
+constexpr size_t kEocdMinSize = 22;
+constexpr size_t kMaxZipComment = 0xFFFF;
+constexpr size_t kMaxEocdSearch = kEocdMinSize + kMaxZipComment;
+
+if (zipSize < kEocdMinSize) {
+    return false;
+}
+
+const size_t searchStart = zipSize - kEocdMinSize;
+const size_t searchFloor =
+    (zipSize > kMaxEocdSearch) ? (zipSize - kMaxEocdSearch) : 0;
+
+size_t eocdOffset = static_cast<size_t>(-1);
+for (size_t off = searchStart;; --off) {
+    if (ReadU32(base + off) == 0x06054B50) {
+        eocdOffset = off;
+        break;
+    }
+    if (off == searchFloor) {
+        break;
+    }
+}
+
+if (eocdOffset == static_cast<size_t>(-1)) {
+    return false;
+}
+
+const uint8_t* eocd = base + eocdOffset;
+```
+
+This keeps the scan inside the legal EOCD search window and never decrements a pointer below `base`.
+
+## Step 3 — Validate Central Directory Offset
+Current code only checks:
+
+```cpp
+if (cdOffset >= zipSize) return false;
+```
+
+Replace the central-directory setup with:
+
+```cpp
+const uint16_t numEntries = ReadU16(eocd + 10);
+const uint32_t cdOffset32 = ReadU32(eocd + 16);
+const size_t cdStart = static_cast<size_t>(cdOffset32);
+
+if (!HasRange(zipSize, cdStart, 46)) {
+    return false;
+}
+
+size_t cdOff = cdStart;
+```
+
+Do not create `const uint8_t* cd = base + cdOffset` until the range check passes.
+
+## Step 4 — Walk Central Directory With Offset Math
+Replace the existing loop header and early record reads:
+
+```cpp
+const uint8_t* cd = base + cdOffset;
+for (int e = 0; e < numEntries && cd + 46 <= end; ++e) {
+    uint32_t cdSig;
+    std::memcpy(&cdSig, cd, 4);
+    if (cdSig != 0x02014B50) break;
+    ...
+    std::string name(reinterpret_cast<const char*>(cd + 46), fnLen);
+    cd += 46 + fnLen + extraLen + commentLen;
+```
+
+with:
+
+```cpp
+for (uint16_t e = 0; e < numEntries; ++e) {
+    if (!HasRange(zipSize, cdOff, 46)) {
+        break;
+    }
+
+    const uint8_t* cd = base + cdOff;
+    if (ReadU32(cd) != 0x02014B50) {
+        break;
+    }
+
+    const uint16_t compression = ReadU16(cd + 10);
+    const uint32_t compSize32 = ReadU32(cd + 20);
+    const uint32_t uncompSize32 = ReadU32(cd + 24);
+    const uint16_t fnLen = ReadU16(cd + 28);
+    const uint16_t extraLen = ReadU16(cd + 30);
+    const uint16_t commentLen = ReadU16(cd + 32);
+    const uint32_t localOffset32 = ReadU32(cd + 42);
+
+    const size_t variableLen =
+        static_cast<size_t>(fnLen) +
+        static_cast<size_t>(extraLen) +
+        static_cast<size_t>(commentLen);
+
+    if (!HasRange(zipSize, cdOff + 46, variableLen)) {
+        break;
+    }
+
+    std::string name(
+        reinterpret_cast<const char*>(base + cdOff + 46),
+        fnLen);
+
+    cdOff += 46 + variableLen;
+```
+
+Important: if your compiler or analyzer complains about `cdOff + 46`, split it into a checked `nameOffset` first:
+
+```cpp
+const size_t nameOffset = cdOff + 46; // safe because HasRange(zipSize, cdOff, 46) passed
+if (!HasRange(zipSize, nameOffset, variableLen)) break;
+```
+
+## Step 5 — Make Entry Index Parsing Non-Throwing
+Current code:
+
+```cpp
+int idx = std::stoi(numStr);
 ```
 
 Replace with:
-```cpp
-        // Jump to the local file header to find the actual data bytes.
-        // Use subtraction to avoid 32-bit overflow on attacker-controlled localOffset.
-        if (zipSize < 30 || localOffset > zipSize - 30) continue;
-```
-
-Find (a few lines later):
-```cpp
-        // Use the size from the Central Directory (always correct).
-        if (rawData + compSize > end) continue;
-```
-
-Replace with:
-```cpp
-        // Use the size from the Central Directory (always correct).
-        // Re-express as subtraction so a malicious compSize / rawData can't wrap.
-        if (rawData < base || rawData > end) continue;
-        const size_t remaining = static_cast<size_t>(end - rawData);
-        if (compSize > remaining) continue;
-```
-
-### Step 2 — Validate `localFnLen + localExLen` doesn't overflow `local + 30 + ...`
-
-Find this line (around line 85):
-```cpp
-        const uint8_t* rawData = local + 30 + localFnLen + localExLen;
-```
-
-`localFnLen` and `localExLen` are both `uint16_t`, so their sum fits in `uint32_t`. But adding to `local + 30` could push past `end`. Add a check immediately after the line:
 
 ```cpp
-        const uint8_t* rawData = local + 30 + localFnLen + localExLen;
-        // Ensure the local-header walk landed inside the buffer before we trust rawData.
-        if (rawData < local || rawData > end) continue;
-```
-
-(The `rawData < local` check catches pointer-arithmetic wrap on systems where pointer subtraction is undefined for OOB pointers — pragmatically, on Windows x64 this would be a UBSan finding.)
-
-### Step 3 — Bound the EOCD scan
-
-The EOCD scan at lines 31–37 iterates backwards from `end - 22` to `base`. For a giant non-ZIP buffer this is O(zipSize), which is wasted work. ZIP spec caps the EOCD comment at 65,535 bytes, so the scan should stop after `22 + 65535 = 65557` bytes from the end. Replace:
-
-```cpp
-    // 1) Find EOCD (signature 0x06054B50) by scanning backwards.
-    const uint8_t* eocd = nullptr;
-    for (const uint8_t* s = end - 22; s >= base; --s) {
-        uint32_t sig;
-        std::memcpy(&sig, s, 4);
-        if (sig == 0x06054B50) { eocd = s; break; }
+int idx = -1;
+try {
+    const unsigned long parsed = std::stoul(numStr);
+    if (parsed > static_cast<unsigned long>(std::numeric_limits<int>::max())) {
+        continue;
     }
-    if (!eocd) return false;
+    idx = static_cast<int>(parsed);
+} catch (...) {
+    continue;
+}
 ```
 
-With:
+This keeps a malformed file name from aborting the whole model constructor through an exception that hides the real parser error.
+
+Add `#include <limits>` if it is not already present.
+
+## Step 6 — Validate Local Header and Raw Data Range Before Pointers
+Replace:
 
 ```cpp
-    // 1) Find EOCD (signature 0x06054B50) by scanning backwards.
-    // Spec caps the EOCD comment at 65535 bytes, so the EOCD itself is at most
-    // 65557 bytes from the end. Bound the scan accordingly.
-    const uint8_t* eocd = nullptr;
-    constexpr size_t kMaxEocdScan = 22 + 0xFFFF;
-    const uint8_t* scanFloor = (zipSize > kMaxEocdScan) ? (end - kMaxEocdScan) : base;
-    for (const uint8_t* s = end - 22; s >= scanFloor; --s) {
-        uint32_t sig;
-        std::memcpy(&sig, s, 4);
-        if (sig == 0x06054B50) { eocd = s; break; }
-    }
-    if (!eocd) return false;
+if (localOffset + 30 > zipSize) continue;
+const uint8_t* local = base + localOffset;
+...
+const uint8_t* rawData = local + 30 + localFnLen + localExLen;
+
+if (rawData + compSize > end) continue;
 ```
 
-### Step 4 — Defend `std::stoi`
-
-Line 73:
-```cpp
-        int idx = std::stoi(numStr);
-```
-
-`std::stoi` throws `std::out_of_range` for inputs that don't fit in `int`. The constructor's outer `catch(...)` block in `Bot::Bot` swallows it and the bot enters stub mode. That's "safe" but it means a malformed entry name is treated identically to a working ZIP with no data. After P0/02 lands this becomes visible to the user, which is correct behavior — but you can also defensively bound it:
+with:
 
 ```cpp
-        int idx = -1;
-        try {
-            idx = std::stoi(numStr);
-        } catch (...) {
-            continue;  // bad entry name — skip without aborting the whole archive
-        }
-        if (idx < 0) continue;
+const size_t localOffset = static_cast<size_t>(localOffset32);
+if (!HasRange(zipSize, localOffset, 30)) {
+    continue;
+}
+
+const uint8_t* local = base + localOffset;
+if (ReadU32(local) != 0x04034B50) {
+    continue;
+}
+
+const uint16_t localFnLen = ReadU16(local + 26);
+const uint16_t localExLen = ReadU16(local + 28);
+
+const size_t localVariableLen =
+    static_cast<size_t>(localFnLen) + static_cast<size_t>(localExLen);
+const size_t rawOffset = localOffset + 30 + localVariableLen;
+
+if (!HasRange(zipSize, localOffset + 30, localVariableLen)) {
+    continue;
+}
+
+const size_t compSize = static_cast<size_t>(compSize32);
+const size_t uncompSize = static_cast<size_t>(uncompSize32);
+
+if (!HasRange(zipSize, rawOffset, compSize)) {
+    continue;
+}
+
+const uint8_t* rawData = base + rawOffset;
 ```
+
+The `rawOffset` expression is safe because:
+- `HasRange(zipSize, localOffset, 30)` proved `localOffset + 30` is inside `zipSize`.
+- `HasRange(zipSize, localOffset + 30, localVariableLen)` proves the variable header area is inside `zipSize`.
+
+If you want to be maximally strict, compute the offsets in two steps after each `HasRange` check to make the proof obvious:
+
+```cpp
+const size_t localDataStart = localOffset + 30;
+if (!HasRange(zipSize, localDataStart, localVariableLen)) continue;
+const size_t rawOffset = localDataStart + localVariableLen;
+```
+
+## Step 7 — Combine With Compression Handling
+After the safe `rawData`, `compSize`, and `uncompSize` variables exist, apply **P0/01**:
+
+```cpp
+if (compression == 0) {
+    if (compSize != uncompSize) continue;
+    out[idx].assign(rawData, rawData + compSize);
+} else if (compression == 8) {
+    // raw DEFLATE via miniz tinfl_decompress_mem_to_mem(..., flags=0)
+} else {
+    continue;
+}
+```
+
+At this point `rawData + compSize` is safe because `HasRange(zipSize, rawOffset, compSize)` already proved the range.
 
 ## Verification
+1. Build `RLInference` and `GoySDKCore`.
 
-1. **Build** — both `RLInference` standalone and `GoySDKCore`.
-2. **Crafted-ZIP fuzz** — write a small test that hands `ExtractDataEntries` a series of crafted buffers:
-   - Empty buffer (size 0) → returns false, no AV.
-   - All-zero buffer of 1 MB → returns false, no AV.
-   - Valid EOCD but `localOffset = 0xFFFFFFFE` → entry skipped, no AV.
-   - Valid EOCD but `compSize = 0xFFFFFFFF` → entry skipped, no AV.
-   - Valid EOCD but `localFnLen = 0xFFFF` → entry skipped, no AV.
-3. **Regression** — existing models still load. Build, inject, confirm `[GoySDK] Slot 0: Loaded ABUSE` still fires.
+2. Add a small parser-focused test if possible. The parser is currently in an anonymous namespace, so a clean test may require either:
+   - moving the parser into a testable internal function, or
+   - temporarily adding a debug-only test harness in `Bot.cpp`.
 
-## Don't do
+3. Test cases:
+   - Empty buffer: returns false, no crash.
+   - 1 MB all-zero buffer: returns false quickly, no crash.
+   - Valid EOCD with `cdOffset` beyond EOF: returns false.
+   - Valid central-directory record with `localOffset = 0xFFFFFFFE`: entry skipped, no crash.
+   - Local header with `localFnLen = 0xFFFF` and insufficient file size: entry skipped, no crash.
+   - Entry with `compSize = 0xFFFFFFFF`: entry skipped, no crash.
+   - Valid STORED model: still loads.
+   - Valid DEFLATE model after P0/01: loads.
 
-- Do not switch to `(int64_t)localOffset + 30 > (int64_t)zipSize` "to avoid overflow." That works but obscures intent and breaks if anyone later changes `zipSize` to a `size_t`. Subtraction-form is the canonical fix.
-- Do not delete the EOCD scan bound (Step 3) thinking "the inputs are trusted." Same reasoning as the rest of this fix: the moment an external-input feature is added, the bound matters.
-- Do not assume `rawData + compSize > end` is "fine on x64 because addresses are 64-bit." The pointer arithmetic happens in `size_t`, but the *operand* `compSize` can still cause logical overflow at the comparison boundary.
+## Don't Do
+- Do not fix this with `(uint64_t)localOffset + 30 > zipSize` everywhere. It is better than the current code but still leaves pointer-range reasoning scattered and easy to regress.
+- Do not compute `rawData` before proving the local header variable-length range is inside the buffer.
+- Do not keep the pointer-based EOCD loop. It is easy to read past `base` and is unnecessary.
+- Do not silently catch every parser problem at the constructor level and call that enough. The parser itself must not perform invalid memory access.
 
 ## Related
-- **P0/01** — same parser, the DEFLATE fix has overlapping changes. Apply both in one editing pass.
+- **P0/01** — DEFLATE support must be layered on top of these safe ranges.
+- **P0/02** — parser failures must surface as load failures, not stub success.

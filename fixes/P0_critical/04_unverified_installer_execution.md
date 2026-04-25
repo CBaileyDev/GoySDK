@@ -1,63 +1,98 @@
-# P0 / 04 — Downloaded installers run elevated with no signature check
+# P0 / 04 — Downloaded installers run elevated with no signature verification
 
 ## TL;DR
-`DependencySetupService` downloads `vc_redist.x64.exe` (from `aka.ms`) and `ViGEmBus_*.exe` (from `github.com`) and immediately spawns them via `Process.Start` with no integrity verification — no Authenticode signature check, no SHA-256 pin, no certificate pinning on the TLS connection. The loader runs with `requireAdministrator`, so any binary that lands in the cache dir runs as admin.
+`DependencySetupService` downloads dependency installers and immediately runs them from an elevated process:
+
+- Microsoft VC++ redistributable from `https://aka.ms/vs/17/release/vc_redist.x64.exe`.
+- ViGEmBus installer from the GitHub releases API or a hardcoded GitHub fallback URL.
+
+The current code verifies neither the file's Authenticode signature nor the signer identity before `Process.Start`. Because `GoyLoader/app.manifest` requests administrator privileges, any binary that lands at the destination path executes elevated.
+
+Fix this by failing closed unless the downloaded `.exe` has a valid Authenticode signature and the signer is one of the exact expected publishers. Optional SHA-256 pins may be added afterward, but they must not be implemented as a `TODO` bypass.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DependencySetupService.cs`
-- Functions: `DownloadAndInstallVcRedistAsync` (line 65), `DownloadAndInstallViGEmBusAsync` (line 105), `RunInstallerAsync` (line 203)
-- File: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`
-- Function: `DownloadToFileCoreAsync` (line 59)
+- Download VC++: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DependencySetupService.cs`, `DownloadAndInstallVcRedistAsync`, current lines around 65-81.
+- Download ViGEmBus: same file, `DownloadAndInstallViGEmBusAsync`, current lines around 105-120.
+- Execute installer: same file, `RunInstallerAsync`, current lines around 203-231.
+- Downloader TLS settings: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`, current lines around 69-77.
 
-## Problem
-The current pipeline:
-1. `FileDownloader.DownloadToFileAsync` opens an HTTPS connection with default `HttpClientHandler` settings and writes the body to disk.
-2. `RunInstallerAsync` calls `Process.Start` on the resulting file with `UseShellExecute = true`.
-3. The loader is admin (per `app.manifest`), so the child inherits the elevated context.
+## Correct Fix Strategy
+Add a single verification gate immediately before any downloaded installer is executed:
 
-There is **no point** between download and execute where the file's authenticity is verified. The threats covered:
+1. Validate the file exists and has a `.exe` extension.
+2. Use `WinVerifyTrust` to verify the embedded Authenticode signature.
+3. Extract the signing certificate with `X509Certificate.CreateFromSignedFile`.
+4. Compare the signer against an explicit allow-list for the installer kind.
+5. Only then call `Process.Start`.
 
-| Threat | Mitigated today? |
-|---|---|
-| Plain HTTP downgrade | Mitigated by `HttpClient` defaulting to TLS for `https://` URLs |
-| MITM with a CA-signed cert (e.g. malicious enterprise root) | **No** |
-| Origin compromise (Microsoft CDN cache poisoning, GitHub release replacement) | **No** |
-| DNS hijack to a different HTTPS endpoint that serves a valid cert for a different domain | Partially — TLS hostname check catches this |
-| Malicious upstream release | **No** — see also P0/03 |
+This should be a hard failure. Do not show a warning and continue.
 
-## Why it matters
-This is the kind of supply-chain hole you read about in incident reports. The loader is exactly the wrong place to be casual about this — it's already admin, it's an attractive escalation target, and users explicitly trust it.
+## Step 1 — Add Installer Identity Enum
+Edit `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DependencySetupService.cs`.
 
-## Root cause
-"`Process.Start(downloadedFile)` ships fast." The author treated MS and GitHub as inherently trustworthy origins. They are *usually* trustworthy, but a security boundary should not be "usually."
+Add this private enum inside `DependencySetupService`:
 
-## Fix
+```csharp
+private enum InstallerKind
+{
+    VcRedist,
+    ViGEmBus,
+}
+```
 
-There are two layers of defense to add: **Authenticode signature verification** (catches MITM and origin compromise for signed binaries) and **SHA-256 pinning** (catches both, but requires bumping the pin on each upstream release).
+Change `RunInstallerAsync` from:
 
-### Step 1 — Authenticode verification of every downloaded `.exe`
+```csharp
+private static async Task RunInstallerAsync(string fileName, string arguments, bool treatAsVcRedist, CancellationToken cancellationToken)
+```
 
-Add a new file `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/AuthenticodeVerifier.cs`:
+to:
+
+```csharp
+private static async Task RunInstallerAsync(
+    string fileName,
+    string arguments,
+    InstallerKind installerKind,
+    CancellationToken cancellationToken)
+```
+
+Update callers:
+
+```csharp
+await RunInstallerAsync(dest, "/install /quiet /norestart", InstallerKind.VcRedist, cancellationToken);
+await RunInstallerAsync(dest, "/quiet /norestart", InstallerKind.ViGEmBus, cancellationToken);
+```
+
+Inside `RunInstallerAsync`, replace `treatAsVcRedist` checks with `installerKind == InstallerKind.VcRedist`.
+
+## Step 2 — Add `AuthenticodeVerifier.cs`
+Create `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/AuthenticodeVerifier.cs`:
 
 ```csharp
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 
 namespace GoyLoader.Services;
+
+public sealed record AuthenticodeResult(
+    bool Trusted,
+    string Detail,
+    string? Subject,
+    string? Thumbprint);
 
 public static class AuthenticodeVerifier
 {
     private const uint WTD_UI_NONE = 2;
-    private const uint WTD_REVOKE_NONE = 0;
+    private const uint WTD_REVOKE_WHOLECHAIN = 1;
     private const uint WTD_CHOICE_FILE = 1;
     private const uint WTD_STATEACTION_VERIFY = 1;
     private const uint WTD_STATEACTION_CLOSE = 2;
-    private const uint WTD_SAFER_FLAG = 0x100;
 
-    private static readonly Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 =
+    private static readonly Guid WintrustActionGenericVerifyV2 =
         new("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WINTRUST_FILE_INFO
     {
         public uint cbStruct;
@@ -66,7 +101,7 @@ public static class AuthenticodeVerifier
         public IntPtr pgKnownSubject;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WINTRUST_DATA
     {
         public uint cbStruct;
@@ -85,11 +120,19 @@ public static class AuthenticodeVerifier
     }
 
     [DllImport("wintrust.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WINTRUST_DATA pWVTData);
+    private static extern int WinVerifyTrust(
+        IntPtr hwnd,
+        ref Guid pgActionID,
+        ref WINTRUST_DATA pWVTData);
 
-    /// <summary>Returns true only if the file has a valid embedded Authenticode signature.</summary>
-    public static bool IsTrusted(string filePath, out string detail)
+    public static AuthenticodeResult Verify(string filePath)
     {
+        if (!File.Exists(filePath))
+            return new(false, $"File does not exist: {filePath}", null, null);
+
+        if (!filePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return new(false, $"Not an .exe file: {filePath}", null, null);
+
         var fileInfo = new WINTRUST_FILE_INFO
         {
             cbStruct = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(),
@@ -97,108 +140,196 @@ public static class AuthenticodeVerifier
             hFile = IntPtr.Zero,
             pgKnownSubject = IntPtr.Zero,
         };
-        var pFile = Marshal.AllocHGlobal(Marshal.SizeOf(fileInfo));
+
+        var pFile = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
+        WINTRUST_DATA data = default;
+
         try
         {
             Marshal.StructureToPtr(fileInfo, pFile, false);
-            var data = new WINTRUST_DATA
+            data = new WINTRUST_DATA
             {
                 cbStruct = (uint)Marshal.SizeOf<WINTRUST_DATA>(),
                 dwUIChoice = WTD_UI_NONE,
-                fdwRevocationChecks = WTD_REVOKE_NONE,
+                fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN,
                 dwUnionChoice = WTD_CHOICE_FILE,
                 pFile = pFile,
                 dwStateAction = WTD_STATEACTION_VERIFY,
-                dwProvFlags = WTD_SAFER_FLAG,
             };
-            var actionId = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+
+            var actionId = WintrustActionGenericVerifyV2;
             var result = WinVerifyTrust(IntPtr.Zero, ref actionId, ref data);
 
-            data.dwStateAction = WTD_STATEACTION_CLOSE;
-            WinVerifyTrust(IntPtr.Zero, ref actionId, ref data);
+            string? subject = null;
+            string? thumbprint = null;
+            try
+            {
+                using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(filePath));
+                subject = cert.Subject;
+                thumbprint = cert.Thumbprint;
+            }
+            catch
+            {
+                // No certificate subject available. WinVerifyTrust result below is authoritative.
+            }
 
             if (result == 0)
-            {
-                detail = "Authenticode signature valid.";
-                return true;
-            }
-            detail = $"WinVerifyTrust returned 0x{result:X8} ({new Win32Exception(result).Message}).";
-            return false;
+                return new(true, "Authenticode signature valid.", subject, thumbprint);
+
+            return new(
+                false,
+                $"WinVerifyTrust returned 0x{result:X8} ({new Win32Exception(result).Message}).",
+                subject,
+                thumbprint);
         }
         finally
         {
+            if (data.cbStruct != 0)
+            {
+                data.dwStateAction = WTD_STATEACTION_CLOSE;
+                var actionId = WintrustActionGenericVerifyV2;
+                WinVerifyTrust(IntPtr.Zero, ref actionId, ref data);
+            }
+
             Marshal.FreeHGlobal(pFile);
         }
     }
 }
 ```
 
-Optionally, also verify the signer subject. Use `System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(filePath)` and check `cert.Subject` contains `"O=Microsoft Corporation"` (for VC++) or `"O=Nefarius Software Solutions"` (for ViGEmBus). This catches "valid signature but signed by attacker's own CA."
+Notes:
+- This uses `WinVerifyTrust` for the trust decision.
+- `X509Certificate2` is only used to display and allow-list the signer.
+- Revocation checking is enabled with `WTD_REVOKE_WHOLECHAIN`. If this causes unacceptable offline failures, make that an explicit product decision. Do not silently disable revocation in a security fix.
 
-### Step 2 — Verify before executing
+## Step 3 — Add Exact Publisher Allow-List
+In `DependencySetupService.cs`, add this helper inside the class:
 
-In `RunInstallerAsync` (`DependencySetupService.cs:203`), find:
 ```csharp
-private static async Task RunInstallerAsync(string fileName, string arguments, bool treatAsVcRedist, CancellationToken cancellationToken)
+private static bool IsExpectedInstallerSigner(
+    InstallerKind kind,
+    string? subject,
+    out string expectedDescription)
 {
-    // Already running elevated (app manifest). No Verb=runas to avoid a second UAC prompt.
-    var psi = new ProcessStartInfo
+    // Keep this allow-list exact enough to prevent "valid signature by someone else"
+    // from passing. If a publisher rotates certificate subjects, inspect the new
+    // signed installer manually and update this list in the same commit.
+    var allowedSubjectFragments = kind switch
     {
-        FileName = fileName,
-```
+        InstallerKind.VcRedist => new[]
+        {
+            "O=Microsoft Corporation",
+            "CN=Microsoft Corporation",
+        },
+        InstallerKind.ViGEmBus => new[]
+        {
+            "Nefarius",
+            "Nefarius Software Solutions",
+        },
+        _ => Array.Empty<string>(),
+    };
 
-Insert immediately at the top of the method body, before the `var psi = ...` line:
-```csharp
-    if (!AuthenticodeVerifier.IsTrusted(fileName, out var trustDetail))
-        throw new InvalidOperationException(
-            $"Refusing to execute installer with invalid Authenticode signature: {fileName}\n{trustDetail}");
-```
+    expectedDescription = string.Join(" or ", allowedSubjectFragments);
+    if (string.IsNullOrWhiteSpace(subject))
+        return false;
 
-### Step 3 — Pin the VC++ download SHA-256
-
-The VC++ x64 redistributable URL `https://aka.ms/vs/17/release/vc_redist.x64.exe` is a stable redirect maintained by Microsoft. Pin its current SHA-256:
-
-In `DependencyChecker.cs`, near `VcRedistDownloadUrl`, add:
-```csharp
-public const string VcRedistDownloadSha256 =
-    // PIN: update on each VC++ runtime version bump. Verify against the hash
-    // published by Microsoft at https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
-    "TODO_PIN_BEFORE_SHIPPING";
-```
-
-In `DownloadAndInstallVcRedistAsync` (`DependencySetupService.cs:65`), after the `await FileDownloader.DownloadToFileAsync(...)` call (line 78), add:
-```csharp
-using (var stream = File.OpenRead(dest))
-{
-    var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
-    var expected = DependencyChecker.VcRedistDownloadSha256.ToLowerInvariant();
-    if (expected != "todo_pin_before_shipping" && actual != expected)
-        throw new InvalidOperationException(
-            $"VC++ installer SHA-256 mismatch.\n  expected: {expected}\n  actual:   {actual}\n" +
-            "If Microsoft has shipped a newer runtime, update VcRedistDownloadSha256 after verifying the new hash.");
+    return allowedSubjectFragments.Any(fragment =>
+        subject.Contains(fragment, StringComparison.OrdinalIgnoreCase));
 }
 ```
 
-(The `expected != "todo_pin_before_shipping"` guard lets development builds compile while the maintainer pins the real hash.)
+Before shipping, run the verification below and replace the broad ViGEm fragments with the exact observed publisher string if possible. The current fragment-based version is still much safer than accepting any valid signature, but exact subject strings or thumbprints are better.
 
-### Step 4 — Don't pin ViGEmBus by SHA — verify by signer
-
-ViGEmBus releases change frequently. Use Authenticode signer-subject check instead. After Step 2, also assert in `DownloadAndInstallViGEmBusAsync` that the signed-by subject contains `"Nefarius"`:
+## Step 4 — Gate Execution in `RunInstallerAsync`
+At the top of `RunInstallerAsync`, before creating `ProcessStartInfo`, add:
 
 ```csharp
-using (var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(dest))
+var trust = AuthenticodeVerifier.Verify(fileName);
+if (!trust.Trusted)
 {
-    if (!cert.Subject.Contains("Nefarius", StringComparison.OrdinalIgnoreCase))
-        throw new InvalidOperationException(
-            $"ViGEmBus installer is signed by an unexpected publisher: {cert.Subject}");
+    throw new InvalidOperationException(
+        $"Refusing to execute installer because Authenticode verification failed: {fileName}\n{trust.Detail}");
+}
+
+if (!IsExpectedInstallerSigner(installerKind, trust.Subject, out var expectedSigner))
+{
+    throw new InvalidOperationException(
+        $"Refusing to execute installer signed by unexpected publisher.\n" +
+        $"  file:     {fileName}\n" +
+        $"  subject:  {trust.Subject ?? "<none>"}\n" +
+        $"  expected: {expectedSigner}\n" +
+        $"  thumb:    {trust.Thumbprint ?? "<none>"}");
 }
 ```
 
-Place this after the Authenticode check, before `await RunInstallerAsync(...)`.
+Then keep the existing `Process.Start` logic.
 
-### Step 5 — Tighten TLS
+After changing `bool treatAsVcRedist` to `InstallerKind installerKind`, update exit-code checks:
 
-In `FileDownloader.DownloadToFileCoreAsync` (`FileDownloader.cs:69`), find:
+```csharp
+if (installerKind == InstallerKind.VcRedist)
+{
+    if (!IsVcRedistSuccess(code))
+        throw new InvalidOperationException($"VC++ installer exited with code {code}.");
+}
+else
+{
+    if (!IsInstallerProbablyOk(code) && code != 1638)
+        throw new InvalidOperationException($"ViGEmBus installer exited with code {code}. Reboot if Windows requires it, then run this loader again.");
+}
+```
+
+## Step 5 — Optional SHA-256 Pins, Fail-Closed Only
+SHA pins are optional and should be used only if the project owner is prepared to update them when Microsoft or ViGEmBus ships a new release.
+
+Do **not** add this kind of bypass:
+
+```csharp
+if (expected != "TODO_PIN_BEFORE_SHIPPING" && actual != expected) ...
+```
+
+That compiles and ships with no hash enforcement.
+
+If you add pins, use a map that fails closed when a pin is configured:
+
+```csharp
+private static readonly IReadOnlyDictionary<InstallerKind, string> InstallerSha256Pins =
+    new Dictionary<InstallerKind, string>
+    {
+        // Fill only with verified production hashes.
+        // [InstallerKind.VcRedist] = "lowercasehex...",
+    };
+
+private static void VerifySha256IfPinned(InstallerKind kind, string fileName)
+{
+    if (!InstallerSha256Pins.TryGetValue(kind, out var expected))
+        return;
+
+    using var stream = File.OpenRead(fileName);
+    var actual = Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
+
+    if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException(
+            $"Installer SHA-256 mismatch for {kind}.\n  expected: {expected}\n  actual:   {actual}");
+    }
+}
+```
+
+Call it after Authenticode verification and before `Process.Start`:
+
+```csharp
+VerifySha256IfPinned(installerKind, fileName);
+```
+
+For the current project, Authenticode plus signer allow-list is the minimum required fix. SHA pinning is a release-policy choice.
+
+## Step 6 — Tighten Downloader TLS Settings
+Edit `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`.
+
+Current handler:
+
 ```csharp
 using var handler = new HttpClientHandler
 {
@@ -208,32 +339,71 @@ using var handler = new HttpClientHandler
 ```
 
 Replace with:
+
 ```csharp
 using var handler = new HttpClientHandler
 {
     AllowAutoRedirect = true,
     AutomaticDecompression = DecompressionMethods.All,
-    SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
     CheckCertificateRevocationList = true,
+    SslProtocols =
+        System.Security.Authentication.SslProtocols.Tls12 |
+        System.Security.Authentication.SslProtocols.Tls13,
 };
 ```
 
-This forces TLS 1.2+ and turns on CRL checking so a revoked cert can't be used.
+Do the same for the GitHub API `HttpClientHandler` inside `DependencySetupService.GetLatestViGEmBusAssetAsync`.
+
+This does not replace Authenticode verification. TLS protects transit; Authenticode verifies the executable.
+
+## Step 7 — Pair With P0/03
+Apply **P0/03** first or in the same commit. The execution gate does not replace path sanitization. You still must:
+
+- Sanitize `asset.Name`.
+- Resolve `dest` with `Path.GetFullPath`.
+- Ensure `dest` stays inside `CacheDir`.
+- Pin the asset download host to expected GitHub hosts.
 
 ## Verification
+1. Build:
+   ```bash
+   dotnet build /Users/carterbarker/Documents/GoySDK/GoyLoader/GoyLoader.csproj
+   ```
 
-1. **Build** — `dotnet build /Users/carterbarker/Documents/GoySDK/GoyLoader/GoyLoader.csproj`.
-2. **Authenticode positive** — call `AuthenticodeVerifier.IsTrusted(@"C:\Windows\System32\notepad.exe", out var d)` and assert it returns `true` with a Microsoft signer.
-3. **Authenticode negative** — generate any unsigned `.exe` (e.g. compile a hello-world without `signtool`) and assert `IsTrusted` returns `false`.
-4. **End-to-end** — point `VcRedistDownloadUrl` at a local web server that serves a binary you tampered with by appending one byte; confirm the SHA pin trips and the loader refuses to install.
-5. **Cert revocation** — there's no easy local test for this; verify the production behavior by intentionally letting the cert expire on a test deployment.
+2. Positive Authenticode smoke test:
+   - Temporarily call `AuthenticodeVerifier.Verify(@"C:\Windows\System32\notepad.exe")`.
+   - Confirm `Trusted == true` and the subject is Microsoft.
 
-## Don't do
+3. Negative unsigned test:
+   - Build any unsigned local `.exe`.
+   - Confirm `AuthenticodeVerifier.Verify(path).Trusted == false`.
 
-- Do not call `Process.Start` *before* `AuthenticodeVerifier.IsTrusted`. The whole point is to fail closed.
-- Do not skip Step 5 — TLS without CRL checking can't tell that an attacker's stolen cert has been revoked.
-- Do not pin SHA for the ViGEmBus installer — releases happen often and a stale pin will block legitimate updates. Authenticode + signer subject is the right control there.
-- Do not catch and swallow the new `InvalidOperationException`s in upstream callers. The user-facing message produced by these throws is the security signal.
+4. VC++ download test:
+   - Trigger `DownloadAndInstallVcRedistAsync`.
+   - Before execution, log `trust.Subject` once.
+   - Confirm it contains an expected Microsoft publisher.
+
+5. ViGEmBus download test:
+   - Trigger `DownloadAndInstallViGEmBusAsync`.
+   - Before execution, log `trust.Subject` once.
+   - Tighten the allow-list to the observed legitimate publisher string if possible.
+
+6. Tampered-file test:
+   - Download a real signed installer.
+   - Append one byte to the file.
+   - Confirm Authenticode verification fails and `Process.Start` is never called.
+
+7. Unexpected-signer test:
+   - Use a validly signed `.exe` from a different publisher.
+   - Confirm Authenticode passes but signer allow-list fails.
+
+## Don't Do
+- Do not run `Process.Start` before verification.
+- Do not accept “any valid Authenticode signature.” A malicious or unrelated signed binary would pass.
+- Do not ship a `TODO_PIN_BEFORE_SHIPPING` hash bypass.
+- Do not disable revocation checks casually. If offline installs must work, document that tradeoff explicitly.
+- Do not catch and swallow verification exceptions in `EnsurePrerequisitesAsync` for VC++. VC++ is required for injection and should fail visibly. ViGEmBus is optional and may keep the current “use Internal input” fallback.
 
 ## Related
-- **P0/03** — fixes the path-traversal write sink. This fix prevents executing a tampered file even if it lands in the right directory.
+- **P0/03** — path traversal and host validation for the GitHub asset.
+- **P2/05** — retry/stall behavior in the same downloader.

@@ -1,18 +1,166 @@
-# P2 / 03 — `InjectLoadLibrary` returns 32-bit truncated HMODULE on x64
+# P2 / 03 — `InjectLoadLibrary` returns a truncated `HMODULE` on x64
 
 ## TL;DR
-`DllInjector.InjectLoadLibrary` calls `GetExitCodeThread` to read `LoadLibraryW`'s return value. On x64, thread exit codes are still 32-bit (`DWORD`), but `HMODULE` is 64-bit. The returned `IntPtr` therefore contains only the **lower 32 bits** of the loaded module's base address. The current code only checks `exitCode == IntPtr.Zero`, which misfires only when the lower 32 bits happen to be zero — but any caller that treats the return value as a real `HMODULE` (e.g., to call `FreeLibrary` later) will hit an access violation.
+`DllInjector.InjectLoadLibrary` uses `GetExitCodeThread` to read the return value of a remote `LoadLibraryW` call and returns that value as an `IntPtr`. On Windows, thread exit codes are `DWORD` values. On x64, `HMODULE` is pointer-sized, so the thread exit channel can only reliably tell us “non-zero success,” not the full module handle.
+
+The current caller discards the return value, so the bug is latent. But if a future unload feature passes this truncated handle to `FreeLibrary`, it can fail or crash the target process. Fix by treating `GetExitCodeThread` as a 32-bit success signal and resolving the real module handle with `EnumProcessModulesEx`.
 
 ## Where
 - File: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DllInjector.cs`
-- Function: `InjectLoadLibrary`
-- Lines: **47–58**
+- Function: `InjectLoadLibrary`, current lines around 47-58.
+- P/Invoke signature: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Native/NativeMethods.cs`, `GetExitCodeThread`, current line around 41.
+- Module enumeration: `DllInjector.IsModuleLoaded`, current lines around 70-106.
+
+## Correct Fix Strategy
+1. Change `GetExitCodeThread` P/Invoke to `out uint`, matching the Win32 `LPDWORD`.
+2. Use the exit code only as `0 == LoadLibrary failed`, `non-zero == likely success`.
+3. After the remote thread completes, enumerate target modules and match the loaded DLL by full path or filename.
+4. Return the handle from `EnumProcessModulesEx`, not the thread exit code.
+5. Pair this with **P2/04** so the nullable first `EnumProcessModulesEx` call is correctly declared.
+
+## Step 1 — Fix `GetExitCodeThread` Signature
+Edit `/Users/carterbarker/Documents/GoySDK/GoyLoader/Native/NativeMethods.cs`.
+
+Replace:
 
 ```csharp
-hThread = NativeMethods.CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLib, remoteMem, 0, out _);
-if (hThread == IntPtr.Zero)
-    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRemoteThread failed.");
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetExitCodeThread(IntPtr hThread, out IntPtr lpExitCode);
+```
 
+with:
+
+```csharp
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetExitCodeThread(IntPtr hThread, out uint lpExitCode);
+```
+
+This makes the truncation explicit instead of hiding it inside an `IntPtr`.
+
+## Step 2 — Add Wait Result Constants
+In `NativeMethods.cs`, near `Infinite`, add:
+
+```csharp
+public const uint WaitObject0 = 0x00000000;
+public const uint WaitTimeout = 0x00000102;
+public const uint WaitFailed = 0xFFFFFFFF;
+```
+
+This makes `WaitForSingleObject` result handling readable.
+
+## Step 3 — Rename or Add Module Enumeration Constant
+Current code defines:
+
+```csharp
+public const uint LIST_MODULES_DEFAULT = 0x03; // LIST_MODULES_32BIT | LIST_MODULES_64BIT
+```
+
+`0x03` is effectively “all modules” for `EnumProcessModulesEx`; the name is misleading. Replace with:
+
+```csharp
+public const uint LIST_MODULES_ALL = 0x03;
+```
+
+Then update all call sites from `LIST_MODULES_DEFAULT` to `LIST_MODULES_ALL`.
+
+## Step 4 — Add `FindModuleHandle`
+Edit `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DllInjector.cs`.
+
+Add this helper below `IsModuleLoaded` or replace `IsModuleLoaded` with shared enumeration helpers:
+
+```csharp
+public static IntPtr FindModuleHandle(int processId, string expectedDllPathOrName)
+{
+    var expectedFullPath = Path.IsPathRooted(expectedDllPathOrName)
+        ? Path.GetFullPath(expectedDllPathOrName)
+        : null;
+    var expectedFileName = Path.GetFileName(expectedDllPathOrName);
+    if (string.IsNullOrWhiteSpace(expectedFileName))
+        return IntPtr.Zero;
+
+    var hProcess = NativeMethods.OpenProcess(
+        NativeMethods.ProcessQueryInformation | NativeMethods.ProcessVmRead,
+        false,
+        processId);
+    if (hProcess == IntPtr.Zero)
+        return IntPtr.Zero;
+
+    try
+    {
+        uint needed = 0;
+        NativeMethods.EnumProcessModulesEx(
+            hProcess,
+            (IntPtr[]?)null,
+            0,
+            out needed,
+            NativeMethods.LIST_MODULES_ALL);
+
+        if (needed == 0)
+            return IntPtr.Zero;
+
+        var count = needed / (uint)IntPtr.Size;
+        var modules = new IntPtr[count];
+        if (!NativeMethods.EnumProcessModulesEx(
+                hProcess,
+                modules,
+                needed,
+                out needed,
+                NativeMethods.LIST_MODULES_ALL))
+        {
+            return IntPtr.Zero;
+        }
+
+        var sb = new System.Text.StringBuilder(1024);
+        foreach (var module in modules)
+        {
+            sb.Clear();
+            NativeMethods.GetModuleFileNameExW(hProcess, module, sb, (uint)sb.Capacity);
+            if (sb.Length == 0)
+                continue;
+
+            var modulePath = sb.ToString();
+            if (expectedFullPath != null)
+            {
+                try
+                {
+                    if (string.Equals(
+                            Path.GetFullPath(modulePath),
+                            expectedFullPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return module;
+                    }
+                }
+                catch
+                {
+                    // Fall back to file-name match below.
+                }
+            }
+
+            if (string.Equals(
+                    Path.GetFileName(modulePath),
+                    expectedFileName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return module;
+            }
+        }
+
+        return IntPtr.Zero;
+    }
+    finally
+    {
+        NativeMethods.CloseHandle(hProcess);
+    }
+}
+```
+
+This uses full-path matching when possible and filename matching as a fallback.
+
+## Step 5 — Update `InjectLoadLibrary`
+In `InjectLoadLibrary`, replace:
+
+```csharp
 var wait = NativeMethods.WaitForSingleObject(hThread, 30_000);
 if (wait != 0)
     throw new TimeoutException("Remote LoadLibraryW did not complete in time.");
@@ -23,151 +171,102 @@ if (!NativeMethods.GetExitCodeThread(hThread, out var exitCode) || exitCode == I
 return exitCode;
 ```
 
-## Problem
-1. The return value is documented (implicitly, by being typed `IntPtr`) as the loaded module handle. On x64 it's not — it's a useless truncation.
-2. The "load failed" detection (`exitCode == IntPtr.Zero`) misses load failures whose bottom 32 bits aren't zero. While `LoadLibraryW` returning NULL is the standard failure indicator, on truly catastrophic failures (e.g., the remote thread crashing before it returns), `GetExitCodeThread` may return a non-zero garbage value.
-3. Callers can't reliably use the return for anything.
-
-## Why it matters
-Today, the only caller (`MainWindow.xaml.cs`) discards the return value, so this bug is latent. The moment someone adds an "unload bot" feature that calls `FreeLibrary`, they'll either crash the host or leak the module forever.
-
-## Root cause
-.NET P/Invoke convenience: `GetExitCodeThread`'s `LPDWORD` parameter is bound to `out IntPtr` for "looks like a pointer." But the underlying API really does only write 32 bits regardless of platform.
-
-## Fix
-
-The standard pattern is to call `GetModuleHandleW` from a *second* remote thread, this time with the DLL path (still in remote memory from the first call). That returns a full HMODULE.
-
-### Step 1 — Implement a remote `GetModuleHandleW` follow-up
-
-Add a private helper to `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/DllInjector.cs`. Insert this method just after `InjectLoadLibrary`:
-
-```csharp
-private static IntPtr ResolveRemoteHModule(IntPtr hProcess, IntPtr remoteDllPathW)
-{
-    var k32 = NativeMethods.GetModuleHandleW("kernel32.dll");
-    if (k32 == IntPtr.Zero) return IntPtr.Zero;
-
-    var getModuleHandle = NativeMethods.GetProcAddress(k32, "GetModuleHandleW");
-    if (getModuleHandle == IntPtr.Zero) return IntPtr.Zero;
-
-    var hThread = NativeMethods.CreateRemoteThread(
-        hProcess, IntPtr.Zero, 0, getModuleHandle, remoteDllPathW, 0, out _);
-    if (hThread == IntPtr.Zero) return IntPtr.Zero;
-
-    try
-    {
-        var wait = NativeMethods.WaitForSingleObject(hThread, 5_000);
-        if (wait != 0) return IntPtr.Zero;
-
-        // Same caveat as LoadLibraryW: this truncates on x64. So we use it only
-        // to confirm "module is loaded" (non-zero), not as the handle itself.
-        if (!NativeMethods.GetExitCodeThread(hThread, out var exitCode))
-            return IntPtr.Zero;
-        return exitCode;
-    }
-    finally
-    {
-        NativeMethods.CloseHandle(hThread);
-    }
-}
-```
-
-Wait — the same truncation applies to `GetModuleHandleW` over the thread-exit-code channel. The proper resolution is to **enumerate the target's modules from this side** using `EnumProcessModulesEx` after the inject completes.
-
-### Step 2 — Use `EnumProcessModulesEx` to resolve the real HMODULE
-
-Replace the `return exitCode;` line in `InjectLoadLibrary` (line 58) with:
-
-```csharp
-            // GetExitCodeThread truncates HMODULE to 32 bits on x64, so its
-            // return is only useful as a "non-zero == load succeeded" signal.
-            // Resolve the actual module handle by enumerating the target's
-            // modules and matching by file name.
-            var moduleFileName = Path.GetFileName(absoluteDllPath);
-            var realHandle = FindModuleHandle(processId, moduleFileName);
-            if (realHandle == IntPtr.Zero)
-                throw new InvalidOperationException(
-                    $"LoadLibraryW reported success but '{moduleFileName}' could not be found in the target's module list.");
-            return realHandle;
-```
-
-Then add a sibling helper just below `IsModuleLoaded`:
-
-```csharp
-public static IntPtr FindModuleHandle(int processId, string moduleFileName)
-{
-    var hProcess = NativeMethods.OpenProcess(
-        NativeMethods.ProcessQueryInformation | NativeMethods.ProcessVmRead,
-        false, processId);
-    if (hProcess == IntPtr.Zero) return IntPtr.Zero;
-
-    try
-    {
-        uint needed = 0;
-        NativeMethods.EnumProcessModulesEx(hProcess, null!, 0, out needed, NativeMethods.LIST_MODULES_DEFAULT);
-        if (needed == 0) return IntPtr.Zero;
-
-        var count = needed / (uint)IntPtr.Size;
-        var modules = new IntPtr[count];
-        if (!NativeMethods.EnumProcessModulesEx(hProcess, modules, needed, out needed, NativeMethods.LIST_MODULES_DEFAULT))
-            return IntPtr.Zero;
-
-        var sb = new System.Text.StringBuilder(260);
-        foreach (var m in modules)
-        {
-            sb.Clear();
-            NativeMethods.GetModuleFileNameExW(hProcess, m, sb, (uint)sb.Capacity);
-            if (sb.Length == 0) continue;
-            if (Path.GetFileName(sb.ToString()).Equals(moduleFileName, StringComparison.OrdinalIgnoreCase))
-                return m;
-        }
-        return IntPtr.Zero;
-    }
-    finally
-    {
-        NativeMethods.CloseHandle(hProcess);
-    }
-}
-```
-
-### Step 3 — Improve the `WaitForSingleObject` failure message
-
-In `InjectLoadLibrary`, line 51–53:
-
-```csharp
-var wait = NativeMethods.WaitForSingleObject(hThread, 30_000);
-if (wait != 0)
-    throw new TimeoutException("Remote LoadLibraryW did not complete in time.");
-```
-
-Replace with:
+with:
 
 ```csharp
 var wait = NativeMethods.WaitForSingleObject(hThread, 30_000);
 switch (wait)
 {
-    case 0: break;                                         // WAIT_OBJECT_0
-    case 0x00000102: throw new TimeoutException("Remote LoadLibraryW did not complete in 30 seconds.");
-    case 0xFFFFFFFF: throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject failed.");
-    default: throw new InvalidOperationException($"Unexpected WaitForSingleObject result: 0x{wait:X8}.");
+    case NativeMethods.WaitObject0:
+        break;
+    case NativeMethods.WaitTimeout:
+        throw new TimeoutException("Remote LoadLibraryW did not complete in 30 seconds.");
+    case NativeMethods.WaitFailed:
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject failed.");
+    default:
+        throw new InvalidOperationException($"Unexpected WaitForSingleObject result: 0x{wait:X8}.");
+}
+
+if (!NativeMethods.GetExitCodeThread(hThread, out var exitCode))
+    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetExitCodeThread failed.");
+
+if (exitCode == 0)
+    throw new InvalidOperationException("LoadLibraryW returned NULL in the target process (missing dependencies or wrong architecture).");
+
+var realHandle = FindModuleHandle(processId, absoluteDllPath);
+if (realHandle == IntPtr.Zero)
+{
+    throw new InvalidOperationException(
+        $"LoadLibraryW reported success, but '{Path.GetFileName(absoluteDllPath)}' was not found in the target module list.");
+}
+
+return realHandle;
+```
+
+Do not return `new IntPtr(exitCode)`. That is the old truncation bug made explicit.
+
+## Step 6 — Update `IsModuleLoaded` to Reuse the Helper
+Optional but recommended:
+
+```csharp
+public static bool IsModuleLoaded(int processId, string moduleFileName)
+{
+    return FindModuleHandle(processId, moduleFileName) != IntPtr.Zero;
 }
 ```
 
+If you keep the existing implementation, still apply **P2/04** to make the first `EnumProcessModulesEx` call nullable and rename the module-list constant.
+
+## Step 7 — Consider Duplicate Module Names
+Filename fallback can be ambiguous if two modules with the same filename are loaded from different paths. That is unlikely for the bot DLL but possible in general.
+
+For injection, always call:
+
+```csharp
+FindModuleHandle(processId, absoluteDllPath)
+```
+
+not:
+
+```csharp
+FindModuleHandle(processId, Path.GetFileName(absoluteDllPath))
+```
+
+The helper can use full-path comparison first and filename fallback only when full-path normalization fails.
+
 ## Verification
+1. Build:
+   ```bash
+   dotnet build /Users/carterbarker/Documents/GoySDK/GoyLoader/GoyLoader.csproj
+   ```
 
-1. **Build** — `dotnet build`.
-2. **Inject + resolve** — inject the bot into the host, log the returned `IntPtr`, confirm:
-   - It's non-zero.
-   - Its lower 32 bits match `EnumProcessModulesEx`'s record.
-   - Its upper 32 bits are non-zero (proving we're returning a full 64-bit handle, not the truncated thread-exit version).
-3. **Negative test** — point `absoluteDllPath` at a DLL with missing dependencies; confirm the throw message is the new "could not be found in module list" line, not the old "returned NULL" one.
+2. Static check:
+   ```bash
+   rg -n "GetExitCodeThread|LIST_MODULES_DEFAULT|LIST_MODULES_ALL|FindModuleHandle" /Users/carterbarker/Documents/GoySDK/GoyLoader
+   ```
+   Expected:
+   - `GetExitCodeThread` uses `out uint`.
+   - No `LIST_MODULES_DEFAULT`.
+   - `FindModuleHandle` exists.
 
-## Don't do
+3. Injection test:
+   - Inject normally.
+   - Log the returned `IntPtr`.
+   - Confirm it matches the module handle returned by `EnumProcessModulesEx`.
 
-- Do not "fix" by changing the P/Invoke signature of `GetExitCodeThread` to `out long`. The OS only writes 4 bytes; the upper bytes are uninitialized stack memory.
-- Do not skip the file-name match in `FindModuleHandle` and just return `modules[modules.Length - 1]`. Module load order isn't guaranteed; you might return a different recently-loaded module.
-- Do not reuse the `hProcess` handle from the inject step in `FindModuleHandle` — it's been closed by the `finally` in `InjectLoadLibrary`. Open a fresh one.
+4. x64 proof:
+   - On a 64-bit target, confirm the returned handle can have non-zero upper 32 bits.
+   - Confirm the old `exitCode` is only 32-bit and is not returned.
+
+5. Negative dependency test:
+   - Point `absoluteDllPath` at a DLL with missing dependencies or wrong architecture.
+   - Confirm the failure message remains clear and no bogus module handle is returned.
+
+## Don't Do
+- Do not change `GetExitCodeThread` to `out long` or `out IntPtr`. The OS API writes a 32-bit `DWORD`.
+- Do not return the thread exit code as the module handle on x64.
+- Do not return the last module in the list. Module load order is not a contract.
+- Do not compare only by filename when you have the absolute DLL path.
 
 ## Related
-- **P2/04** — same `EnumProcessModulesEx` call site has a separate `null` argument issue. Bundle.
+- **P2/04** — required nullability cleanup for `EnumProcessModulesEx`.

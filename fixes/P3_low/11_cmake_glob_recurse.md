@@ -1,11 +1,25 @@
-# P3 / 11 — `GLOB_RECURSE` doesn't trigger reconfigure on new files
+# P3 / 11 — `GLOB_RECURSE` does not reconfigure automatically for new files
 
 ## TL;DR
-`internal_bot/CMakeLists.txt` uses `file(GLOB_RECURSE TNTS_SOURCES "Components/*.cpp" ...)`. CMake's documentation explicitly warns against this — adding a new `.cpp` file does not trigger re-configuration, so the new source isn't compiled until the user manually reruns CMake. Switch to explicit source lists or use `CONFIGURE_DEPENDS`.
+Both CMake projects use `file(GLOB_RECURSE ...)` without `CONFIGURE_DEPENDS`:
+
+- `internal_bot/CMakeLists.txt`
+- `repos/RLInference/CMakeLists.txt`
+
+Without `CONFIGURE_DEPENDS`, adding a new `.cpp` file may not trigger CMake reconfiguration, so the new source is not compiled until someone manually reruns CMake.
+
+Fix either by adding `CONFIGURE_DEPENDS` to the globs or by replacing globs with explicit source lists. For this repo, `CONFIGURE_DEPENDS` is the pragmatic low-risk fix.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/internal_bot/CMakeLists.txt`
-- Lines: **22–34**
+- `/Users/carterbarker/Documents/GoySDK/internal_bot/CMakeLists.txt`, current lines around 22-34.
+- `/Users/carterbarker/Documents/GoySDK/repos/RLInference/CMakeLists.txt`, current line around 10.
+- Both projects use `cmake_minimum_required(VERSION 3.18)`, which supports `CONFIGURE_DEPENDS`.
+
+## Correct Fix Strategy
+Use `CONFIGURE_DEPENDS` for the existing glob patterns. This preserves the current project style while making new files visible on normal builds.
+
+## Step 1 — Update `internal_bot/CMakeLists.txt`
+Replace:
 
 ```cmake
 file(GLOB_RECURSE TNTS_SOURCES
@@ -23,37 +37,8 @@ file(GLOB_RECURSE GOYSDK_SOURCES
 )
 ```
 
-## Problem
-- New `.cpp` file under `Components/` → CMake's generated build system has no rule for it until you manually rerun CMake.
-- Symptom: "I added MyMod.cpp but it's not being compiled / not being linked."
-- The `GLOB` form has the same problem; `GLOB_RECURSE` adds the additional pitfall that nested directories are walked silently.
+with:
 
-## Fix
-
-Two valid approaches.
-
-### Option A (recommended) — `CONFIGURE_DEPENDS`
-
-CMake 3.12+ supports `CONFIGURE_DEPENDS` which makes the generator re-glob at every build, so new files are picked up automatically.
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/CMakeLists.txt`. Find:
-```cmake
-file(GLOB_RECURSE TNTS_SOURCES
-    "Components/*.cpp"
-    "Modules/*.cpp"
-    "Extensions/*.cpp"
-    "ImGui/*.cpp"
-    "RLSDK/*.cpp"
-    "OverlayRenderer.cpp"
-    "pch.cpp"
-)
-
-file(GLOB_RECURSE GOYSDK_SOURCES
-    "GoySDK/*.cpp"
-)
-```
-
-Replace with:
 ```cmake
 file(GLOB_RECURSE TNTS_SOURCES CONFIGURE_DEPENDS
     "Components/*.cpp"
@@ -70,56 +55,63 @@ file(GLOB_RECURSE GOYSDK_SOURCES CONFIGURE_DEPENDS
 )
 ```
 
-Verify `cmake_minimum_required(VERSION 3.18)` (line 1) is ≥ 3.12 — yes, 3.18 supports `CONFIGURE_DEPENDS`.
-
-### Option B — Explicit source list
-
-If the project values reproducible builds across CMake versions, list every file explicitly. More maintenance overhead but bulletproof:
+## Step 2 — Update `repos/RLInference/CMakeLists.txt`
+Replace:
 
 ```cmake
-set(TNTS_SOURCES
-    Components/Component.cpp
-    Components/Components/Core.cpp
-    Components/Components/Console.cpp
-    Components/Components/Events.cpp
-    Components/Components/GameState.cpp
-    Components/Components/GUI.cpp
-    Components/Components/Instances.cpp
-    Components/Components/Main.cpp
-    Components/Components/Manager.cpp
-    Extensions/Extensions/Colors.cpp
-    Extensions/Extensions/Formatting.cpp
-    Extensions/Extensions/Math.cpp
-    Extensions/Extensions/Memory.cpp
-    Extensions/Extensions/UnrealMemory.cpp
-    Modules/Module.cpp
-    Modules/Mods/Drawing.cpp
-    OverlayRenderer.cpp
-    pch.cpp
-    # add ImGui and RLSDK files explicitly too — generate the list with `ls`
-)
-
-set(GOYSDK_SOURCES
-    GoySDK/BotModule.cpp
-    GoySDK/ObsBuilder.cpp
-    GoySDK/ViGemController.cpp
-)
+file(GLOB_RECURSE RLINFERENCE_SOURCES "src/*.cpp")
 ```
 
-(Generate the full list with `find Components Modules Extensions ImGui RLSDK GoySDK -name '*.cpp' | sort`.)
+with:
+
+```cmake
+file(GLOB_RECURSE RLINFERENCE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+```
+
+If **P0/01** vendors `miniz`, the RLInference source list may also explicitly add `third_party/miniz/miniz.c`. Do that in `add_library`, not by broadening the glob to all third-party files.
+
+## Step 3 — Alternative: Explicit Source Lists
+If the project wants reproducible source declarations instead of globs, replace the globs with explicit lists. That is more work but valid.
+
+Generate a starting list with:
+
+```bash
+find /Users/carterbarker/Documents/GoySDK/internal_bot \
+  -path '*/build' -prune -o \
+  -name '*.cpp' -print | sort
+```
+
+Then remove generated/vendor files you do not want compiled directly.
+
+Do not mix a large explicit list with a broad glob for the same directories. Pick one style.
 
 ## Verification
+1. Configure/build normally.
 
-### If Option A
-- Add a new file `Components/Components/Test.cpp` containing `// test`.
-- Build. Confirm CMake re-globs (you'll see `Re-running CMake...` or similar).
-- Confirm the new file is listed in the build output.
-- Delete the test file when done.
+2. Add a temporary source file:
+   ```text
+   /Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/__cmake_glob_test.cpp
+   ```
+   with:
+   ```cpp
+   namespace { int cmake_glob_test_symbol = 0; }
+   ```
 
-### If Option B
-- Build. Confirm every existing source still compiles.
-- Try adding a new `.cpp` without updating the list — confirm the build doesn't pick it up (this is the trade-off of explicit lists).
+3. Build again.
+   Expected: CMake notices glob mismatch and re-runs configure before compiling.
 
-## Don't do
-- Don't switch to `aux_source_directory` — it's the original CMake glob and has all the same problems.
-- Don't keep `GLOB_RECURSE` without `CONFIGURE_DEPENDS` "because it works in our CI." The first time someone adds a file locally, they'll waste time debugging "why isn't this compiling."
+4. Delete the temporary file and build again.
+   Expected: CMake re-runs configure and removes it from the target.
+
+5. Repeat for:
+   ```text
+   /Users/carterbarker/Documents/GoySDK/repos/RLInference/src/__cmake_glob_test.cpp
+   ```
+
+## Don't Do
+- Do not use `aux_source_directory`; it has the same class of problem.
+- Do not add `CONFIGURE_DEPENDS` to vendor directories broadly. Keep third-party sources explicit.
+- Do not leave RLInference unchanged; it has the same issue as `internal_bot`.
+
+## Related
+- **P0/01** — if `miniz` is vendored, wire it explicitly while touching `repos/RLInference/CMakeLists.txt`.

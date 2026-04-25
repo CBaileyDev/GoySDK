@@ -1,99 +1,134 @@
-# P1 / 07 — `IsInGame` and `CurrentGameEvent` are non-atomic across threads
+# P1 / 07 — Overlay game-event state is read outside its lock
 
 ## TL;DR
-`OverlayRenderer::IsInGame` (plain `bool`) and `OverlayRenderer::CurrentGameEvent` (raw pointer) are written from the game-thread event hooks (`OnGameEventStart`, `OnGameEventDestroyed`) and read from the render-thread `OnRender` and game-thread `PlayerTickCalled`. The reads at line 209 and 323 are **outside** the `dataMutex` lock, so a concurrent destroy can null the pointer between the check and the dereference, and the `bool` flag has no acquire/release semantics tying it to the pointer publish.
+`OverlayRenderer::IsInGame` and `OverlayRenderer::CurrentGameEvent` are public static fields. They are written by game-event hooks and read by `OverlayRenderer::PlayerTickCalled`, `OverlayRenderer::OnRender`, and `GUIComponent::Render`. Some reads happen before `OverlayRenderer::dataMutex` is acquired.
+
+The old suggested fix used atomics. Atomics alone do not solve the underlying problem because `CurrentGameEvent` points to an Unreal-owned object whose lifetime is not controlled by GoySDK. The better fix is to make overlay state private, guard it with `dataMutex`, have `OnRender` perform its own locked state check, and remove public unlocked reads.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`
-- Field declarations: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`
-- Field definitions: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp` lines **149–150**
-- Unlocked reads: line **209** (`if (!IsInGame || !CurrentGameEvent ...)`), line **323** (`if (!IsInGame) { return; }`)
-- Writes: lines **184** (`IsInGame = false;`), **200** (`CurrentGameEvent = static_cast<...>`), **203** (`IsInGame = true;`)
+- State declarations: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`, current lines around 50-51.
+- State definitions: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`, current lines around 149-150.
+- Unlocked reads:
+  - `OverlayRenderer::PlayerTickCalled`, current line around 209.
+  - `OverlayRenderer::OnRender`, current line around 323.
+  - `GUIComponent::Render`, `/Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/GUI.cpp`, current line around 1242: `if (OverlayMod.IsInGame) OverlayMod.OnRender();`.
+- Writes:
+  - `OverlayRenderer::OnGameEventStart`, current lines around 193-203.
+  - `OverlayRenderer::OnGameEventDestroyed`, current lines around 178-189.
 
-## Problem
-1. The line-209 check `if (!IsInGame || !CurrentGameEvent || ...)` happens *before* `std::lock_guard<std::mutex> lock(dataMutex);` at line 213. Between the check and the lock acquisition, another thread can run `OnGameEventDestroyed` which sets `CurrentGameEvent = nullptr`. The function then proceeds to dereference `CurrentGameEvent->LocalPlayers` (line 219) on a null pointer.
-2. The plain `bool IsInGame` provides no memory ordering. On weakly-ordered architectures (ARM, but also some Windows-on-ARM scenarios), the writer can publish `IsInGame = true` before `CurrentGameEvent` is visible, so the reader sees `true` and a still-null pointer.
-3. The render thread reads `IsInGame` at line 323 with no lock. Same issue: the bool can be `true` while `CurrentGameEvent` and the rendering caches are mid-tear-down.
+## Correct Fix Strategy
+Use `dataMutex` as the single synchronization boundary for overlay state and render caches:
 
-## Why it matters
-Crash on round transitions or exit-to-menu. Especially likely when overlay features (`drawBoostTimers`, `drawBallPrediction`) are enabled, because they iterate cached state under the assumption it's coherent.
+- Keep `CurrentGameEvent` private and accessed only while `dataMutex` is held.
+- Keep `IsInGame` private and accessed only while `dataMutex` is held.
+- Add a locked public accessor if another component needs to query state.
+- Prefer calling `OverlayMod.OnRender()` unconditionally from GUI; `OnRender()` should return early under its own lock.
+- Do not rely on `std::atomic<AGameEvent_Soccar_TA*>` for lifetime. Atomic pointer publication still does not keep the Unreal object alive.
 
-## Root cause
-The author added `dataMutex` for the data caches but left the gate variables outside the lock for "performance." The cost of an uncontended lock acquisition is nanoseconds, far less than the cost of a use-after-free.
+## Step 1 — Make State Private and Rename Fields
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`.
 
-## Fix
-
-### Step 1 — Make the state atomic
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`. Find the declarations of `IsInGame` and `CurrentGameEvent`:
+Replace the public fields:
 
 ```cpp
 static bool IsInGame;
 static AGameEvent_Soccar_TA* CurrentGameEvent;
 ```
 
-Replace with:
+with a public accessor:
 
 ```cpp
-static std::atomic<bool> IsInGame;
-static std::atomic<AGameEvent_Soccar_TA*> CurrentGameEvent;
+static bool IsInGameActive();
 ```
 
-Add `#include <atomic>` near the top of the header if not already present.
+Then add private fields near the bottom of the class:
 
-### Step 2 — Update the field definitions
+```cpp
+private:
+    static bool isInGame_;
+    static AGameEvent_Soccar_TA* currentGameEvent_;
+```
 
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`. Find lines 149–150:
+If this header currently has no private section, add one after the public configuration/cache declarations. Keep `dataMutex` accessible as needed by existing code, but do not leave `isInGame_` or `currentGameEvent_` public.
+
+## Step 2 — Update Static Definitions
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`.
+
+Replace:
 
 ```cpp
 bool OverlayRenderer::IsInGame = false;
 AGameEvent_Soccar_TA* OverlayRenderer::CurrentGameEvent = nullptr;
 ```
 
-Replace with:
+with:
 
 ```cpp
-std::atomic<bool> OverlayRenderer::IsInGame{false};
-std::atomic<AGameEvent_Soccar_TA*> OverlayRenderer::CurrentGameEvent{nullptr};
+bool OverlayRenderer::isInGame_ = false;
+AGameEvent_Soccar_TA* OverlayRenderer::currentGameEvent_ = nullptr;
 ```
 
-### Step 3 — Update the writers to use release ordering
+Add the accessor:
 
-In `OnGameEventStart` (line 193), find:
 ```cpp
-            CurrentGameEvent = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
-            Console.Write("GameEventHook: Stored GameEvent instance");
-        }
-        IsInGame = true;
+bool OverlayRenderer::IsInGameActive() {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    return isInGame_;
+}
 ```
 
-Replace with:
+## Step 3 — Update Writers
+In `OverlayRenderer::OnGameEventDestroyed`, replace:
+
 ```cpp
-            CurrentGameEvent.store(static_cast<AGameEvent_Soccar_TA*>(event.Caller()), std::memory_order_release);
-            Console.Write("GameEventHook: Stored GameEvent instance");
-        }
-        IsInGame.store(true, std::memory_order_release);
+std::lock_guard<std::mutex> lock(dataMutex);
+CurrentGameEvent = nullptr;
+IsInGame = false;
+carBoostData.clear();
+...
 ```
 
-In `OnGameEventDestroyed` (line 178), find:
+with:
+
 ```cpp
-        std::lock_guard<std::mutex> lock(dataMutex);
-        CurrentGameEvent = nullptr;
-        IsInGame = false;
+std::lock_guard<std::mutex> lock(dataMutex);
+isInGame_ = false;
+currentGameEvent_ = nullptr;
+localPlayerPRI = nullptr;
+carBoostData.clear();
+ballScreenPositions.clear();
+ballPredictionSamples.clear();
+boostTimerBadges.clear();
 ```
 
-Replace with:
+In `OverlayRenderer::OnGameEventStart`, replace:
+
 ```cpp
-        std::lock_guard<std::mutex> lock(dataMutex);
-        IsInGame.store(false, std::memory_order_release);
-        CurrentGameEvent.store(nullptr, std::memory_order_release);
+if (event.Caller() && event.Caller()->IsA(AGameEvent_Soccar_TA::StaticClass()))
+{
+    CurrentGameEvent = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+    Console.Write("GameEventHook: Stored GameEvent instance");
+}
+IsInGame = true;
 ```
 
-(Order matters: clear `IsInGame` before nulling the pointer so a reader who sees `IsInGame == true` is more likely to also see a non-null pointer. Pair this with the snapshot pattern in Step 4 to make the reader correctness independent of order.)
+with:
 
-### Step 4 — Update the readers to snapshot under lock
+```cpp
+if (event.Caller() && event.Caller()->IsA(AGameEvent_Soccar_TA::StaticClass()))
+{
+    std::lock_guard<std::mutex> lock(dataMutex);
+    currentGameEvent_ = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+    isInGame_ = true;
+    Console.Write("GameEventHook: Stored GameEvent instance");
+}
+```
 
-In `PlayerTickCalled` (line 208), find:
+Do not set `isInGame_ = true` if the caller was not a valid `AGameEvent_Soccar_TA`.
+
+## Step 4 — Update `PlayerTickCalled`
+Current start:
+
 ```cpp
 void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
     if (!IsInGame || !CurrentGameEvent || !event.Caller() || !event.Caller()->IsA(APlayerController_TA::StaticClass())) {
@@ -104,6 +139,7 @@ void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
 ```
 
 Replace with:
+
 ```cpp
 void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
     if (!event.Caller() || !event.Caller()->IsA(APlayerController_TA::StaticClass())) {
@@ -111,18 +147,34 @@ void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
     }
 
     std::lock_guard<std::mutex> lock(dataMutex);
-    AGameEvent_Soccar_TA* gevt = CurrentGameEvent.load(std::memory_order_acquire);
-    if (!IsInGame.load(std::memory_order_acquire) || !gevt) {
+    if (!isInGame_ || !currentGameEvent_) {
         return;
     }
+
+    AGameEvent_Soccar_TA* gevt = currentGameEvent_;
 ```
 
-Then below that, replace every `CurrentGameEvent->...` with `gevt->...`. Specifically:
-- Line 219: `TArray<APlayerController_TA*> localPlayers = CurrentGameEvent->LocalPlayers;` → `TArray<APlayerController_TA*> localPlayers = gevt->LocalPlayers;`
-- Line 226: `TArray<ACar_TA*> cars = CurrentGameEvent->Cars;` → `TArray<ACar_TA*> cars = gevt->Cars;`
-- Line 227: `TArray<ABall_TA*> balls = CurrentGameEvent->GameBalls;` → `TArray<ABall_TA*> balls = gevt->GameBalls;`
+Then replace:
 
-In `OnRender` (line 322), find:
+```cpp
+TArray<APlayerController_TA*> localPlayers = CurrentGameEvent->LocalPlayers;
+TArray<ACar_TA*> cars = CurrentGameEvent->Cars;
+TArray<ABall_TA*> balls = CurrentGameEvent->GameBalls;
+```
+
+with:
+
+```cpp
+TArray<APlayerController_TA*> localPlayers = gevt->LocalPlayers;
+TArray<ACar_TA*> cars = gevt->Cars;
+TArray<ABall_TA*> balls = gevt->GameBalls;
+```
+
+This still reads an Unreal-owned object, but it eliminates the check-then-lock race and keeps all overlay cache mutations under one lock.
+
+## Step 5 — Update `OnRender`
+Current start:
+
 ```cpp
 void OverlayRenderer::OnRender() {
     if (!IsInGame) {
@@ -133,32 +185,78 @@ void OverlayRenderer::OnRender() {
 ```
 
 Replace with:
+
 ```cpp
 void OverlayRenderer::OnRender() {
     std::lock_guard<std::mutex> lock(dataMutex);
-    if (!IsInGame.load(std::memory_order_acquire)) {
+    if (!isInGame_) {
         return;
     }
 ```
 
-(`OnRender` doesn't dereference `CurrentGameEvent`, so we only need the bool check, but inside the lock to keep state and caches coherent.)
+No caller should need to check `IsInGame` before calling `OnRender`.
+
+## Step 6 — Update GUI Call Site
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/GUI.cpp`.
+
+Current code:
+
+```cpp
+if (OverlayMod.IsInGame) OverlayMod.OnRender();
+```
+
+Replace with:
+
+```cpp
+OverlayMod.OnRender();
+```
+
+`OnRender` now owns the state check under `dataMutex`.
+
+If you still want a public query for UI display, use:
+
+```cpp
+if (OverlayRenderer::IsInGameActive()) {
+    ...
+}
+```
+
+Do not read a public static bool.
+
+## Step 7 — Static Checks
+After editing, run:
+
+```bash
+rg -n "IsInGame|CurrentGameEvent|isInGame_|currentGameEvent_" /Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.* /Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/GUI.cpp
+```
+
+Expected:
+- No `OverlayMod.IsInGame`.
+- No public `CurrentGameEvent`.
+- `isInGame_` and `currentGameEvent_` only in `OverlayRenderer.cpp` and private declarations.
+- `IsInGameActive()` only as a locked accessor.
 
 ## Verification
+1. Build `GoySDKCore`.
 
-1. **Build** — `cmake --build`.
-2. **Stress test** — enable all overlay options (`drawBoostTimers`, `drawBallPrediction`, etc.), play a string of exhibition matches, force-quit each match in different states. Pre-fix: occasional crash in `OverlayRenderer::PlayerTickCalled` or `OnRender`. Post-fix: no crashes.
-3. **Static check** — confirm `IsInGame` and `CurrentGameEvent` are accessed only via `.load(...)` / `.store(...)` (no implicit conversions). Run:
-   ```bash
-   awk '/OverlayRenderer::/,/^}/' /Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp | grep -nE '\b(IsInGame|CurrentGameEvent)\b' | grep -v '\.load\|\.store\|^[0-9]*:OverlayRenderer'
-   ```
-   Expected: zero hits.
+2. Render smoke test:
+   - Inject, enter a match, enable overlay features.
+   - Confirm overlays still render.
 
-## Don't do
+3. Transition stress:
+   - Enter and leave matches repeatedly.
+   - Toggle `drawBoostTimers` and `drawBallPrediction`.
+   - Confirm no crash in `PlayerTickCalled` or `OnRender`.
 
-- Do not just take `dataMutex` for the writer block in `OnGameEventStart` and call it done. The render thread might still see torn writes if the bool isn't atomic, because the lock-acquire in `OnRender` doesn't synchronize-with a lock-release in `OnGameEventStart` if the writer doesn't take the lock.
-- Do not use `std::memory_order_relaxed` for these accesses. The whole point is acquire/release pairing — relaxed defeats the purpose.
-- Do not change `CurrentGameEvent` to a `std::shared_ptr`. The lifetime is owned by the host engine, not by us; wrapping it in a shared_ptr without a custom deleter is a bug, and with one is over-engineered.
+4. Destroy-state test:
+   - After `OnGameEventDestroyed`, confirm `carBoostData`, `ballScreenPositions`, `ballPredictionSamples`, and `boostTimerBadges` are empty and `OnRender` returns early.
+
+## Don't Do
+- Do not make `CurrentGameEvent` atomic and call it solved. Atomic raw pointers do not own engine object lifetime.
+- Do not leave `GUI.cpp` reading a public static state flag.
+- Do not check state before locking and then mutate caches after locking; that is the exact race being fixed.
+- Do not hold `dataMutex` while calling unrelated bot inference or GUI control logic. Keep it scoped to overlay state and render caches.
 
 ## Related
-- **P1/01** — same shape (`padStates_` cross-mutex). Same fix pattern (snapshot under lock).
-- **P1/03** — same shape on the BotModule side (`gameEvent_`).
+- **P1/01** — boost pad state should be copied as a snapshot before overlay reads it.
+- **P1/03** — BotModule has a similar game-event pointer issue.

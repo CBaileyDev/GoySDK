@@ -29,9 +29,9 @@ Severity rubric:
 | [P1_high/02_kickoff_timer_multislot.md](P1_high/02_kickoff_timer_multislot.md) | Kickoff timer ticks once per slot, runs N× too fast |
 | [P1_high/03_gameevent_use_after_free.md](P1_high/03_gameevent_use_after_free.md) | `gameEvent_` deref without revalidation in auto-skip / auto-forfeit |
 | [P1_high/04_dead_join_press_countdown.md](P1_high/04_dead_join_press_countdown.md) | `joinPressCountdown_` negative branch is unreachable |
-| [P1_high/05_dead_auto_requeue_chat.md](P1_high/05_dead_auto_requeue_chat.md) | `autoRequeue_` and `autoChat_` are pure UI placebos |
+| [P1_high/05_dead_auto_requeue_chat.md](P1_high/05_dead_auto_requeue_chat.md) | `autoRequeue_` and `autoChat_` are dead fields/accessors |
 | [P1_high/06_zip_integer_overflow.md](P1_high/06_zip_integer_overflow.md) | ZIP-parser bounds checks use `a + b > c` (overflow) |
-| [P1_high/07_overlay_atomic_state.md](P1_high/07_overlay_atomic_state.md) | `IsInGame` and `CurrentGameEvent` are non-atomic across threads |
+| [P1_high/07_overlay_atomic_state.md](P1_high/07_overlay_atomic_state.md) | Overlay game-event state is read outside its lock |
 
 ## P2 — Medium
 
@@ -50,7 +50,7 @@ Severity rubric:
 | [P3_low/01_was_active_unused.md](P3_low/01_was_active_unused.md) | Unused `bool wasActive` in `AssignModel` |
 | [P3_low/02_dead_for_loop_overlay.md](P3_low/02_dead_for_loop_overlay.md) | Empty body for-loop in `OverlayRenderer::PlayerTickCalled` |
 | [P3_low/03_dllmain_member_function_cast.md](P3_low/03_dllmain_member_function_cast.md) | `Core.InitializeGlobals` cast to `LPTHREAD_START_ROUTINE` |
-| [P3_low/04_boost_diag_first_car_only.md](P3_low/04_boost_diag_first_car_only.md) | `boostDiagDone_` printed only for first car with boost component |
+| [P3_low/04_boost_diag_first_car_only.md](P3_low/04_boost_diag_first_car_only.md) | `boostDiagDone_` one-shot diagnostic has no missing-component signal |
 | [P3_low/05_xor_obfuscation_theatre.md](P3_low/05_xor_obfuscation_theatre.md) | `ProcessFinder` XOR obfuscation gives false confidence |
 | [P3_low/06_nullcheck_macro_safety.md](P3_low/06_nullcheck_macro_safety.md) | `nullcheck` macro unused, lacks `do { } while(0)` wrapping |
 | [P3_low/07_typo_initalized.md](P3_low/07_typo_initalized.md) | "Initalized" typo in OverlayRenderer log |

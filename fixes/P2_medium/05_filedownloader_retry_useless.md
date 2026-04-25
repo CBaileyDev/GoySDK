@@ -1,72 +1,63 @@
-# P2 / 05 — Download retry budget (3.2s) dwarfed by per-attempt 30-min timeout
+# P2 / 05 — Download retry loop is defeated by a 30-minute per-attempt timeout
 
 ## TL;DR
-`FileDownloader.DownloadToFileAsync` configures a 4-attempt retry loop with exponential backoff (`400 * (1 << (attempt - 1))` ms), giving a total backoff of `400 + 800 + 1600 = 2.8s` between attempts. But each attempt's `HttpClient.Timeout = TimeSpan.FromMinutes(30)`, so a single hung request blocks the loader for 30 minutes before the retry logic ever sees a failure. The retry exists in name only.
-
-## Where
-- File: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`
-- Retry loop: lines **23–50** (`DownloadToFileAsync`)
-- Per-attempt timeout: line **77** (`client.Timeout = TimeSpan.FromMinutes(30);`)
-
-## Problem
-A typical small dependency installer (`vc_redist.x64.exe` is ~25MB) on a working connection completes in seconds. A degraded connection (slow but not broken) can stall progress to a few KB/s; on a 25MB download that's 30+ minutes. The 30-min `Timeout` was chosen for the worst-case slow connection, not for "give up and retry."
-
-The result: when the connection genuinely fails (no DNS, server 5xx, TCP RST), the retry kicks in fine. When the connection *partially* fails (slow, intermittent, or stalled mid-stream), the user stares at a hung loader for 30 minutes.
-
-## Why it matters
-Loader UX. Users blame the loader rather than their connection.
-
-## Root cause
-Two unrelated knobs (overall download timeout vs. per-attempt timeout) collapsed into one. The per-attempt timeout should be much smaller; the *total* time budget should be the larger value.
-
-## Fix
-
-### Step 1 — Add a no-progress watchdog
-
-Edit `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`. Find the constants at the top of `DownloadToFileCoreAsync` (lines 65–77):
+`FileDownloader.DownloadToFileAsync` has a retry loop, but each attempt uses:
 
 ```csharp
-var dir = Path.GetDirectoryName(filePath);
-if (!string.IsNullOrEmpty(dir))
-    Directory.CreateDirectory(dir);
-
-using var handler = new HttpClientHandler
-{
-    AllowAutoRedirect = true,
-    AutomaticDecompression = DecompressionMethods.All
-};
-using var client = new HttpClient(handler);
-client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
 client.Timeout = TimeSpan.FromMinutes(30);
 ```
 
-Replace with:
+That means a stalled request can hang for 30 minutes before retry logic runs. The backoff budget is only a few seconds, so retries help for immediate failures but not for partial stalls.
 
-```cpp
-var dir = Path.GetDirectoryName(filePath);
-if (!string.IsNullOrEmpty(dir))
-    Directory.CreateDirectory(dir);
+Fix by using a smaller per-attempt timeout and adding a no-progress watchdog around each stream read.
 
-using var handler = new HttpClientHandler
-{
-    AllowAutoRedirect = true,
-    AutomaticDecompression = DecompressionMethods.All,
-};
-using var client = new HttpClient(handler);
-client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
-client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
-// Per-attempt time budget: caller can retry. 90s is enough for normal ~25MB
-// downloads on slow but working connections; truly bad connections will fail
-// fast and let the retry loop try again.
-client.Timeout = TimeSpan.FromSeconds(90);
+## Where
+- File: `/Users/carterbarker/Documents/GoySDK/GoyLoader/Services/FileDownloader.cs`
+- Retry loop: `DownloadToFileAsync`, current lines around 15-53.
+- HTTP client setup: `DownloadToFileCoreAsync`, current lines around 69-77.
+- Read loop: same function, current lines around 86-94.
+
+## Correct Fix Strategy
+Use two separate concepts:
+
+- **Per-attempt wall-clock timeout**: how long one attempt may take before the retry loop can try again.
+- **No-progress timeout**: how long a socket read may receive zero bytes before it is treated as stalled.
+
+Recommended starting values:
+
+- Per-attempt timeout: 90 seconds.
+- No-progress timeout: 30 seconds.
+- Attempts: keep current 4 unless product wants a longer total wait.
+
+## Step 1 — Add Constants
+Edit `FileDownloader.cs`.
+
+Inside `FileDownloader`, near `UserAgent`, add:
+
+```csharp
+private static readonly TimeSpan PerAttemptTimeout = TimeSpan.FromSeconds(90);
+private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(30);
 ```
 
-(The above uses C# syntax — remove the `cpp` after `replace with` block tag if your editor renders this as a literal code block.)
+Keep `maxAttempts = 4` unless you want to make total retry time longer.
 
-### Step 2 — Add a no-progress watchdog inside the read loop
+## Step 2 — Tighten HTTP Client Timeout
+Replace:
 
-Find the read loop (lines 86–94):
+```csharp
+client.Timeout = TimeSpan.FromMinutes(30);
+```
+
+with:
+
+```csharp
+client.Timeout = PerAttemptTimeout;
+```
+
+This makes a whole attempt fail in a reasonable time, allowing the existing retry loop to do useful work.
+
+## Step 3 — Add No-Progress Watchdog
+Replace the current read loop:
 
 ```csharp
 var buffer = new byte[81920];
@@ -80,18 +71,17 @@ while ((n = await httpStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancel
 }
 ```
 
-Replace with:
+with:
 
 ```csharp
 var buffer = new byte[81920];
 long read = 0;
-int n;
-var lastProgressUtc = DateTime.UtcNow;
-const int kStallSeconds = 30;
 while (true)
 {
     using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-    stallCts.CancelAfter(TimeSpan.FromSeconds(kStallSeconds));
+    stallCts.CancelAfter(NoProgressTimeout);
+
+    int n;
     try
     {
         n = await httpStream.ReadAsync(buffer.AsMemory(0, buffer.Length), stallCts.Token);
@@ -99,57 +89,90 @@ while (true)
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
     {
         throw new IOException(
-            $"Download stalled — no bytes received in {kStallSeconds} seconds.");
+            $"Download stalled: no bytes received for {NoProgressTimeout.TotalSeconds:0} seconds.");
     }
-    if (n <= 0) break;
+
+    if (n <= 0)
+        break;
 
     await fileStream.WriteAsync(buffer.AsMemory(0, n), cancellationToken);
     read += n;
-    lastProgressUtc = DateTime.UtcNow;
     progress?.Report(new DownloadProgress(read, total));
 }
 ```
 
-(`lastProgressUtc` is overwritten and not read elsewhere in this snippet — leave it for future use, or remove if your linter complains.)
+Do not add an unused `lastProgressUtc` variable. The linked cancellation token is the watchdog.
 
-### Step 3 — Increase the retry attempt count and improve the backoff
+## Step 4 — Keep Partial-File Cleanup
+The current retry loop deletes the partial file after transient failures:
 
-The current loop tries 4 times. With Step 1's tighter timeout, a "genuinely down" remote will be detected in ~90s + backoff, so 4 attempts in ~5 minutes is fine. If you want to be more patient, increase `maxAttempts`:
-
-In `DownloadToFileAsync` (line 21), find:
 ```csharp
-const int maxAttempts = 4;
-```
-Optionally bump to:
-```csharp
-const int maxAttempts = 6;  // ~9.5 min total worst-case retry budget with 90s per-attempt
+if (File.Exists(filePath))
+{
+    try { File.Delete(filePath); }
+    catch { }
+}
 ```
 
-(Optional — the original 4 is fine if you don't want to wait longer.)
+Keep this. The new stall exception is an `IOException`, and `IsTransientNetworkFailure` already treats `IOException` as retryable.
 
-### Step 4 — Make the retry decision smarter on stall vs. hard-fail
+## Step 5 — Optional: Report Retry Status
+`FileDownloader` currently has only byte progress, not status text. If the UI needs better feedback, do not print from the downloader directly. Instead either:
 
-Find (lines 30–32):
+- extend the downloader signature with an optional `IProgress<string> status`, or
+- let callers report before retrying.
+
+This is optional. The functional fix is timeout/watchdog behavior.
+
+## Step 6 — Pair With TLS and Signature Work
+If **P0/04** is being applied in the same pass, also update the `HttpClientHandler` here:
+
 ```csharp
-catch (Exception ex) when (attempt < maxAttempts
-                            && !cancellationToken.IsCancellationRequested
-                            && IsTransientNetworkFailure(ex))
+using var handler = new HttpClientHandler
+{
+    AllowAutoRedirect = true,
+    AutomaticDecompression = DecompressionMethods.All,
+    CheckCertificateRevocationList = true,
+    SslProtocols =
+        System.Security.Authentication.SslProtocols.Tls12 |
+        System.Security.Authentication.SslProtocols.Tls13,
+};
 ```
 
-`IsTransientNetworkFailure` already includes `IOException`, which catches the new stall throw from Step 2. No change needed.
+This is a transport hardening improvement. It does not replace Authenticode verification.
 
 ## Verification
+1. Build:
+   ```bash
+   dotnet build /Users/carterbarker/Documents/GoySDK/GoyLoader/GoyLoader.csproj
+   ```
 
-1. **Build** — `dotnet build`.
-2. **Stall test** — run a local HTTP server that accepts the connection but never sends a body. Trigger a download. Pre-fix: hangs 30 minutes. Post-fix: throws "Download stalled" after ~30 seconds, retry kicks in, eventually fails out cleanly.
-3. **Slow-but-working test** — use `iptables`/`tc`/Network Link Conditioner to throttle the loopback connection to 100 KB/s. Confirm a 1 MB file downloads successfully (the per-attempt 90s budget is enough for >100 KB/s × 90 = 9 MB).
-4. **Regression** — normal-network download of `vc_redist.x64.exe` still completes in <30s.
+2. Stalled-body test:
+   - Run a local HTTP server that sends headers and then never sends body bytes.
+   - Trigger a download.
+   - Expected: each attempt fails after about 30 seconds of no body progress, then retries.
 
-## Don't do
+3. Slow-but-working test:
+   - Serve a file slowly but with at least one chunk every few seconds.
+   - Expected: download continues as long as bytes arrive before `NoProgressTimeout`.
 
-- Do not set `client.Timeout` to a very low value (e.g., 10s). On legitimately-slow connections, that triggers retries that themselves can't complete, producing a worse experience than "wait 30 min."
-- Do not remove the retry loop. The retry exists for transient packet loss / DNS hiccups, which are common on home networks.
-- Do not make the stall detector trigger on the `total` byte count. The server may not send `Content-Length`; rely on "no bytes received in N seconds" as the universal stall signal.
+4. Total attempt timeout test:
+   - Serve bytes slowly enough that the overall attempt exceeds 90 seconds.
+   - Expected: attempt times out and retry logic runs.
+
+5. Normal download regression:
+   - Download VC++ or ViGEmBus over a normal connection.
+   - Expected: progress reports and successful completion.
+
+6. Cancellation test:
+   - Cancel the provided `cancellationToken`.
+   - Expected: cancellation propagates and is not converted into a retryable stall exception.
+
+## Don't Do
+- Do not reduce `client.Timeout` to a very small value such as 10 seconds; legitimate slow downloads may never complete.
+- Do not remove retries.
+- Do not use `Content-Length` as a stall detector; servers may omit it.
+- Do not leave unused watchdog variables in the loop.
 
 ## Related
-- **P0/04** — same downloader is used to fetch installers that should also be Authenticode-verified. The retry/timeout fix here doesn't substitute for the verification fix there.
+- **P0/04** — downloaded installers must also be verified before execution.

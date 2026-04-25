@@ -1,45 +1,47 @@
-# P3 / 10 — Empty `OnCreate`/`OnDestroy` in OverlayRenderer
+# P3 / 10 — Empty `OverlayRenderer::OnCreate` / `OnDestroy`
+
+## TL;DR
+`OverlayRenderer` defines empty `OnCreate` and `OnDestroy` methods and calls them from its constructor/destructor:
+
+```cpp
+OverlayRenderer::OverlayRenderer() : Module(...) {
+    OnCreate();
+}
+OverlayRenderer::~OverlayRenderer() { OnDestroy(); }
+
+void OverlayRenderer::OnCreate() {}
+void OverlayRenderer::OnDestroy() {}
+```
+
+The previous note said those calls would resolve to base-class methods if the overrides were removed. That is wrong for the current tree: `Module` does not declare `OnCreate` or `OnDestroy`. If you remove the functions but leave the calls, the code will not compile.
+
+Fix by deleting both the empty methods **and** the constructor/destructor calls.
 
 ## Where
 - File: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`
-- Lines: **484–490**
+- Constructor/destructor: current lines around 479-482.
+- Empty functions: current lines around 484-490.
+- Declarations: `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`, current lines around 38-39.
+- Base class: `/Users/carterbarker/Documents/GoySDK/internal_bot/Modules/Module.hpp`; no `OnCreate` / `OnDestroy` virtuals exist there.
+
+## Correct Fix
+Remove the dead hooks completely.
+
+## Step 1 — Update Header
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`.
+
+Delete:
 
 ```cpp
-void OverlayRenderer::OnCreate() {
-   
-}
-
-void OverlayRenderer::OnDestroy() {
-   
-}
+void OnCreate();
+void OnDestroy();
 ```
 
-## Problem
-The base `Module` class likely declares `OnCreate`/`OnDestroy` as virtual hooks. The overrides here do nothing. Either there's missing intended cleanup, or the overrides should be removed.
+## Step 2 — Update Constructor and Destructor
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`.
 
-## Fix
+Replace:
 
-### Option A (recommended) — Remove the overrides
-
-If `Module::OnCreate`/`OnDestroy` are virtual with empty defaults, the overrides add nothing.
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.cpp`. Find lines 484–490:
-
-```cpp
-void OverlayRenderer::OnCreate() {
-   
-}
-
-void OverlayRenderer::OnDestroy() {
-   
-}
-```
-
-Delete both functions.
-
-Then edit `/Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.hpp`. Find the declarations of `OnCreate` and `OnDestroy` and remove them.
-
-Then check the constructor/destructor at lines 479–482:
 ```cpp
 OverlayRenderer::OverlayRenderer() : Module("GameEventHook", "Hooks into game events", States::STATES_All) {
     OnCreate();
@@ -47,20 +49,58 @@ OverlayRenderer::OverlayRenderer() : Module("GameEventHook", "Hooks into game ev
 OverlayRenderer::~OverlayRenderer() { OnDestroy(); }
 ```
 
-If you removed the overrides, these calls now resolve to the base class's empty `Module::OnCreate`/`OnDestroy`. If the base class's are also empty no-ops, you can remove the explicit calls. Otherwise leave them.
+with:
 
-### Option B — Move existing init/teardown into them
+```cpp
+OverlayRenderer::OverlayRenderer()
+    : Module("GameEventHook", "Hooks into game events", States::STATES_All) {}
 
-If the constructor/destructor currently do work that *should* be in `OnCreate`/`OnDestroy` (e.g., if the convention is "constructor only initializes, OnCreate registers"), leave the functions in place but populate them. Look at how `BotModule::OnCreate` (line 199 of BotModule.cpp) is structured — it does padState init. The overlay equivalent would be initializing render-state defaults.
+OverlayRenderer::~OverlayRenderer() = default;
+```
 
-For OverlayRenderer there isn't anything obvious to move, so Option A is the right call.
+If your compiler rejects an out-of-line defaulted destructor because of the existing declaration, use:
+
+```cpp
+OverlayRenderer::~OverlayRenderer() {}
+```
+
+but prefer `= default`.
+
+## Step 3 — Delete Empty Definitions
+Delete:
+
+```cpp
+void OverlayRenderer::OnCreate() {
+
+}
+
+void OverlayRenderer::OnDestroy() {
+
+}
+```
+
+## Step 4 — Confirm No Other Calls Exist
+Run:
+
+```bash
+rg -n "OverlayRenderer::OnCreate|OverlayRenderer::OnDestroy|OnCreate\\(\\)|OnDestroy\\(\\)" /Users/carterbarker/Documents/GoySDK/internal_bot/OverlayRenderer.*
+```
+
+Expected:
+- no `OverlayRenderer::OnCreate`,
+- no `OverlayRenderer::OnDestroy`,
+- no constructor/destructor calls to them.
 
 ## Verification
-- Build. No `Module::OnCreate is hidden` warnings.
-- Inject; overlay still renders.
+1. Build `GoySDKCore`.
+2. Inject/run.
+3. Confirm `OverlayRenderer::Initialize()` still calls `Hook()` and logs initialization.
+4. Confirm overlay rendering behavior is unchanged.
 
-## Don't do
-- Don't add `// TODO: implement` comments and leave them empty. That's worse than removing — it suggests something needs to be done that nobody has scoped.
+## Don't Do
+- Do not remove only the function definitions and leave constructor/destructor calls.
+- Do not add `// TODO` empty hooks.
+- Do not assume `Module` provides fallback hook methods; it does not in this tree.
 
 ## Related
 None.

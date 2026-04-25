@@ -1,66 +1,110 @@
-# P3 / 13 — `ComputeObservedOnGround` is a passthrough
+# P3 / 13 — `ComputeObservedOnGround` is a passthrough helper
 
 ## TL;DR
-`GoySDK/GameState.hpp` defines `ComputeObservedOnGround(bool rawOnGround) { return rawOnGround; }`. The function does literally nothing besides pass through its argument. Either implement the intended logic or inline the field access.
+`GoySDK/GameState.hpp` defines:
+
+```cpp
+inline bool ComputeObservedOnGround(bool rawOnGround) {
+    return rawOnGround;
+}
+```
+
+That function adds no behavior. Either delete it and inline `rawOnGround`, or implement a real “observed on ground” heuristic. The safer default is deletion because a ground-state heuristic can change action-mask behavior and should be designed/tested deliberately.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/GameState.hpp`
-- Lines: **3–10**
+- Helper: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/GameState.hpp`, current lines around 6-8.
+- Caller: `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`, current line around 748:
+  ```cpp
+  snap.isOnGround = ComputeObservedOnGround(rawOnGround);
+  ```
+- Include: `BotModule.cpp`, current line around 4:
+  ```cpp
+  #include "GameState.hpp"
+  ```
 
-```cpp
-namespace GoySDK {
+## Correct Fix Options
+Choose one:
 
-inline bool ComputeObservedOnGround(bool rawOnGround) {
-    return rawOnGround;
-}
+- **Option A, recommended:** inline `rawOnGround` and delete the empty helper/file.
+- **Option B:** implement a real heuristic, but only with explicit inputs and regression testing against the action mask.
 
-}
-```
+## Option A — Inline and Delete
+### Step A1 — Replace the Call Site
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/BotModule.cpp`.
 
-Caller: `BotModule::ReadGameState` line **748**:
+Replace:
+
 ```cpp
 snap.isOnGround = ComputeObservedOnGround(rawOnGround);
 ```
 
-## Problem
-The function name suggests there should be derivation logic ("observed" on ground might combine raw on-ground with `WorldContact.bHasContact`, `WorldContact.Normal.Z`, jump state, etc., to filter brief contact glitches). The implementation is a stub.
+with:
 
-## Why it matters
-If the bot ever briefly leaves the ground for one tick (e.g., crossing a small bump), `rawOnGround` flips false, and the action mask immediately switches to "air actions only" (per `ActionMask.hpp:137-141`). For one tick, the bot can't apply ground-only actions like throttle+steer combos.
-
-## Fix
-
-### Option A — Implement debouncing (recommended if the bug above is observable)
-
-Either add per-slot state (last N ticks of `rawOnGround`) and require N consecutive false values to flip "observed" off, or use a more sophisticated check:
-
-Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/GameState.hpp`. Find:
 ```cpp
-inline bool ComputeObservedOnGround(bool rawOnGround) {
-    return rawOnGround;
+snap.isOnGround = rawOnGround;
+```
+
+### Step A2 — Remove the Include
+In the same file, delete:
+
+```cpp
+#include "GameState.hpp"
+```
+
+### Step A3 — Delete the Empty File
+Delete:
+
+```text
+/Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/GameState.hpp
+```
+
+Only delete it after confirming no other file includes it:
+
+```bash
+rg -n "GameState.hpp|ComputeObservedOnGround" /Users/carterbarker/Documents/GoySDK/internal_bot
+```
+
+Expected before deletion:
+- one include,
+- one call,
+- the helper definition.
+
+Expected after deletion:
+- no matches.
+
+## Option B — Implement a Real Heuristic
+Only choose this if you have observed action-mask flicker caused by one-frame `bOnGround` noise.
+
+### Step B1 — Define the Heuristic Clearly
+A minimal contact-aware heuristic could be:
+
+```cpp
+inline bool ComputeObservedOnGround(
+    bool rawOnGround,
+    bool hasWorldContact,
+    float worldContactNormalZ)
+{
+    if (rawOnGround) {
+        return true;
+    }
+
+    return hasWorldContact && worldContactNormalZ > 0.85f;
 }
 ```
 
-Replace with a snapshot-aware version:
-```cpp
-/// Heuristic "observed on ground": treat the car as grounded if it's actually on
-/// the ground OR if it's in contact with a wall/ceiling whose normal is roughly
-/// vertical (turtled flat — should still use ground actions). Filters brief
-/// 1-tick suspensions during light bumps.
-inline bool ComputeObservedOnGround(bool rawOnGround,
-                                    bool hasWorldContact,
-                                    float worldContactNormalZ) {
-    if (rawOnGround) return true;
-    if (hasWorldContact && worldContactNormalZ > 0.85f) return true;
-    return false;
-}
-```
+This says:
+- raw on-ground always wins,
+- otherwise strong upward contact counts as ground-like.
 
-Update the call site `BotModule.cpp:748`:
+### Step B2 — Update the Call Site
+Replace:
+
 ```cpp
 snap.isOnGround = ComputeObservedOnGround(rawOnGround);
 ```
-to:
+
+with:
+
 ```cpp
 snap.isOnGround = ComputeObservedOnGround(
     rawOnGround,
@@ -68,39 +112,53 @@ snap.isOnGround = ComputeObservedOnGround(
     snap.rawWorldContactNormal.Z);
 ```
 
-For multi-tick debouncing, add a per-slot ring buffer in `PlayerBotSlot` and have `ComputeObservedOnGround` take a span of the last N raw values.
+### Step B3 — Understand the Risk
+This changes action-mask behavior in `ActionMask.hpp`:
 
-### Option B — Inline and delete the helper
-
-If no derivation is intended, the helper adds noise. Edit `BotModule.cpp:748`:
 ```cpp
-snap.isOnGround = ComputeObservedOnGround(rawOnGround);
+if (player.isOnGround) {
+    applyMask(tables.groundMask, true);
+} else {
+    applyMask(tables.airMask, true);
+}
 ```
-Replace with:
+
+A too-permissive ground heuristic can allow ground actions while the car is actually airborne. A too-strict heuristic can keep the existing flicker. Test before shipping.
+
+### Step B4 — Multi-Tick Debounce Requires Slot State
+Do not fake debounce inside a stateless inline function. Real debounce needs per-slot history, e.g.:
+
 ```cpp
-snap.isOnGround = rawOnGround;
+int observedOnGroundGraceTicks = 0;
 ```
 
-Then delete the entire `GameState.hpp` if it has no other content (verify first):
-```bash
-cat /Users/carterbarker/Documents/GoySDK/internal_bot/GoySDK/GameState.hpp
-```
-
-If it only contains the passthrough, delete the file and remove its `#include "GameState.hpp"` from `BotModule.cpp:4` (and any other includes).
+inside `PlayerBotSlot`, updated each frame from `rawOnGround`. That is a larger behavior change and should be a separate P2/P1 fix if action-mask flicker is confirmed.
 
 ## Verification
-
 ### If Option A
-- Build.
-- Drive the bot over a series of bumps; confirm with diag logging that `snap.isOnGround` stays `true` across single-tick `rawOnGround` flickers.
+1. Build `GoySDKCore`.
+2. Run:
+   ```bash
+   rg -n "GameState.hpp|ComputeObservedOnGround" /Users/carterbarker/Documents/GoySDK/internal_bot
+   ```
+   Expected: no matches.
+3. Confirm action-mask behavior is unchanged because `snap.isOnGround` still equals `rawOnGround`.
 
 ### If Option B
-- Build. Confirm the file deletion didn't break anything.
-- Confirm `grep -rn "GameState.hpp\|ComputeObservedOnGround"` returns no hits.
+1. Build `GoySDKCore`.
+2. Add temporary diagnostics for:
+   - `rawOnGround`,
+   - `rawHasWorldContact`,
+   - `rawWorldContactNormal.Z`,
+   - `snap.isOnGround`.
+3. Drive over small bumps and wall/ceiling contacts.
+4. Confirm the heuristic improves the specific observed problem without allowing obviously wrong ground actions in air.
 
-## Don't do
-- Don't leave the stub in place "in case we add logic later." Add the logic now or remove the placeholder.
-- Don't make the function `constexpr` to "optimize" — `inline` already does what's needed.
+## Don't Do
+- Do not leave a passthrough helper “for later.”
+- Do not implement debounce without per-slot state.
+- Do not change `isOnGround` semantics without retesting action masks.
+- Do not delete `GameState.hpp` before checking for all includes.
 
 ## Related
-- This relates to action-mask correctness (which is per-snapshot). If you fix this, also re-test the masking behavior with the new on-ground definition.
+- **P0/05** — action-mask behavior depends on `snap.isOnGround`.

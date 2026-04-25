@@ -1,100 +1,116 @@
-# P3 / 03 — `Core.InitializeGlobals` cast to `LPTHREAD_START_ROUTINE`
+# P3 / 03 — `Core.InitializeGlobals` is cast to `LPTHREAD_START_ROUTINE`
 
 ## TL;DR
-`dllmain.cpp` does:
+`internal_bot/dllmain.cpp` starts initialization with:
+
 ```cpp
 CreateThread(nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(Core.InitializeGlobals), hModule, 0, nullptr);
 ```
-This works because `Core.InitializeGlobals` happens to compile to a free-function-shaped pointer in the `Components/Components/Core` module, but the syntax `Core.InitializeGlobals` *looks* like it's binding a member function pointer, which would be UB to cast to `LPTHREAD_START_ROUTINE`. Even when correct, the line is fragile to refactors.
+
+`Core.InitializeGlobals` currently resolves to a static member function declared as:
+
+```cpp
+static void InitializeGlobals(HMODULE hModule);
+```
+
+The code happens to compile, but it is fragile and misleading:
+
+- It uses instance-style syntax for a static method.
+- It casts a `void(HMODULE)` function to a `DWORD WINAPI(LPVOID)` thread procedure.
+- It leaks the thread handle returned by `CreateThread`.
+
+Fix with an explicit thread trampoline whose signature actually matches `LPTHREAD_START_ROUTINE`.
 
 ## Where
-- File: `/Users/carterbarker/Documents/GoySDK/internal_bot/dllmain.cpp`
-- Line: **17**
+- Thread creation: `/Users/carterbarker/Documents/GoySDK/internal_bot/dllmain.cpp`, current line around 17.
+- Static method declaration: `/Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/Core.hpp`, current line around 22.
+- Static method definition: `/Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/Core.cpp`, current line around 100.
+
+## Correct Fix Strategy
+Do not call `InitializeGlobals` directly from `DllMain`. Keep initialization on a separate thread, but use a correctly typed trampoline and close the thread handle.
+
+## Step 1 — Add a Trampoline in `dllmain.cpp`
+Edit `/Users/carterbarker/Documents/GoySDK/internal_bot/dllmain.cpp`.
+
+Above `DllMain`, add:
 
 ```cpp
-CreateThread(nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(Core.InitializeGlobals), hModule, 0, nullptr);
-```
-
-## Problem
-1. If `Core` is an instance and `InitializeGlobals` is a non-`static` member function, taking its address with `Core.InitializeGlobals` (no `&`) is non-standard syntax and may not even produce a usable function pointer; the cast then hides the error and produces UB.
-2. If `Core` is an instance but `InitializeGlobals` is `static`, the syntax works and is portable, but the `Core.` prefix is misleading.
-3. If `Core` is a `struct` (effectively a namespace) the code works but again the syntax suggests otherwise.
-4. `CreateThread` is called from inside `DllMain`. The callback runs while the loader lock is potentially held — `InitializeGlobals` must not call `LoadLibrary`, `GetModuleHandle`, or anything that touches DLL init.
-
-Verify what `Core.InitializeGlobals` actually is:
-```bash
-grep -n "InitializeGlobals" /Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/Core.cpp /Users/carterbarker/Documents/GoySDK/internal_bot/Components/Components/Core.hpp
-```
-
-## Fix
-
-### Step 1 — Confirm `InitializeGlobals` is a free function or static method
-
-After running the grep above:
-- If it's a **free function** in a namespace `Core`, change the call to `&Core::InitializeGlobals` (no instance access).
-- If it's a **static method** of class `Core`, change to `&Core::InitializeGlobals`.
-- If it's a **non-static method**, see "Plan B" below.
-
-For the most common case (static method or namespace function), edit `/Users/carterbarker/Documents/GoySDK/internal_bot/dllmain.cpp`. Find:
-
-```cpp
-CreateThread(nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(Core.InitializeGlobals), hModule, 0, nullptr);
-```
-
-Replace with:
-
-```cpp
-HANDLE hThread = CreateThread(
-    nullptr, 0,
-    [](LPVOID lpParam) -> DWORD {
-        // Trampoline: run global init off the DllMain thread.
-        Core::InitializeGlobals(static_cast<HMODULE>(lpParam));
-        return 0;
-    },
-    hModule, 0, nullptr);
-if (hThread) {
-    CloseHandle(hThread);
-}
-```
-
-(The lambda has no captures, so it implicitly converts to `LPTHREAD_START_ROUTINE` — no `reinterpret_cast` needed.)
-
-### Plan B — `InitializeGlobals` is a non-static member
-
-Add a free-function trampoline near the top of `dllmain.cpp`:
-
-```cpp
-static DWORD WINAPI InitializeGlobalsTrampoline(LPVOID lpParam) {
-    Core.InitializeGlobals(static_cast<HMODULE>(lpParam));
+static DWORD WINAPI InitializeGlobalsThread(LPVOID param)
+{
+    CoreComponent::InitializeGlobals(static_cast<HMODULE>(param));
     return 0;
 }
 ```
 
-Then call:
-```cpp
-CreateThread(nullptr, 0, InitializeGlobalsTrampoline, hModule, 0, nullptr);
-```
+`CoreComponent::InitializeGlobals` is the actual static method name. Do not use `Core::InitializeGlobals`; `Core` is the global instance name, not the class.
 
-### Step 2 — Don't leak the thread handle
-
-The original code didn't capture or close the handle returned by `CreateThread`. The lambda version above closes it. If you used Plan B, add the same `CloseHandle`:
+## Step 2 — Replace the Casted `CreateThread`
+Replace:
 
 ```cpp
-HANDLE hThread = CreateThread(nullptr, 0, InitializeGlobalsTrampoline, hModule, 0, nullptr);
-if (hThread) CloseHandle(hThread);
+CreateThread(nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(Core.InitializeGlobals), hModule, 0, nullptr);
 ```
 
-### Step 3 — Verify the callback is safe to run during DLL_PROCESS_ATTACH
+with:
 
-`InitializeGlobals` must not block on the loader lock. Audit the function for `LoadLibrary*`, `GetModuleHandle*` (calling `GetProcAddress` is fine), `CoInitialize`, and similar. If it does any of those, defer them to the first frame after init by setting a flag and processing it from a hooked tick.
+```cpp
+HANDLE initThread = CreateThread(nullptr, 0, InitializeGlobalsThread, hModule, 0, nullptr);
+if (initThread) {
+    CloseHandle(initThread);
+}
+```
+
+Closing the handle does not stop the thread. It only releases this DLL's handle reference.
+
+## Step 3 — Optional: Fix Similar Pattern in `CoreComponent::InitializeThread`
+`Core.cpp` currently has:
+
+```cpp
+MainThread = CreateThread(nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(InitializeGlobals), nullptr, 0, nullptr);
+```
+
+This is the same signature bug, and worse, it passes `nullptr` where `InitializeGlobals` expects an `HMODULE`. If this method is unused, either delete it or update it to use the same trampoline pattern with a real module handle.
+
+Recommended minimal change:
+
+```cpp
+void CoreComponent::InitializeThread()
+{
+    HMODULE module = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCSTR>(&CoreComponent::InitializeGlobals),
+        &module);
+
+    MainThread = CreateThread(nullptr, 0, InitializeGlobalsThread, module, 0, nullptr);
+}
+```
+
+However, `InitializeGlobalsThread` is currently in `dllmain.cpp`, so this exact reuse requires moving the trampoline to a shared file or adding a second local trampoline in `Core.cpp`. If `InitializeThread()` is not called anywhere, leave it for a separate cleanup.
+
+## Step 4 — Loader-Lock Reminder
+This fix keeps the current behavior of starting a thread from `DllMain`. That is a common pattern, but the new thread may begin running before `DllMain` returns. `InitializeGlobals` calls functions like `GetModuleFileNameA`, initializes logging, scans modules, and hooks systems. If you observe loader-lock deadlocks, the deeper fix is to defer heavy initialization until after process attach returns.
+
+Do not broaden this P3 cleanup into an initialization redesign unless you are actively debugging a deadlock.
 
 ## Verification
+1. Build `GoySDKCore`.
 
-1. **Build** — must compile without `reinterpret_cast` warnings.
-2. **Inject** — confirm the bot still loads and `Console.Write("[GoySDK] Initializing...")` appears.
-3. **Static check** — `grep -n "reinterpret_cast<LPTHREAD_START_ROUTINE>" /Users/carterbarker/Documents/GoySDK/internal_bot/dllmain.cpp` should be empty.
+2. Static checks:
+   ```bash
+   rg -n "reinterpret_cast<LPTHREAD_START_ROUTINE>|Core\\.InitializeGlobals|Core::InitializeGlobals" /Users/carterbarker/Documents/GoySDK/internal_bot
+   ```
+   Expected for `dllmain.cpp`:
+   - no `reinterpret_cast<LPTHREAD_START_ROUTINE>`,
+   - no `Core.InitializeGlobals`,
+   - no `Core::InitializeGlobals`.
 
-## Don't do
+3. Inject/run:
+   - Confirm `[Core Module] Initializing globals...` still appears.
+   - Confirm no thread-handle leak is reported by diagnostics.
 
-- Do not remove the `CreateThread` and call `Core.InitializeGlobals(hModule)` directly inside `DllMain`. That makes init run while the loader lock is held — guaranteed deadlock for any reasonable init path.
-- Do not pass `nullptr` for `lpParameter` — the function needs the `HMODULE` to set the DLL search directory, etc.
+## Don't Do
+- Do not call `CoreComponent::InitializeGlobals(hModule)` directly inside `DllMain`.
+- Do not use `Core::InitializeGlobals`; `Core` is not the class name.
+- Do not pass `nullptr` as the module handle.
+- Do not keep the reinterpret cast just because it compiles.
