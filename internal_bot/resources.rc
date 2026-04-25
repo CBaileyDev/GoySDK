@@ -1,0 +1,9 @@
+#include "resource.h"
+
+IDI_MAIN_ICON    ICON   "Resources\\AppIcon.ico"
+IDR_APP_LOGO     RCDATA "Resources\\AppIcon.png"
+
+IDR_ABUSE_HEAD   RCDATA "models\\ABUSE\\SHARED_HEAD.lt"
+IDR_ABUSE_POLICY RCDATA "models\\ABUSE\\POLICY.lt"
+IDR_FROST_HEAD   RCDATA "models\\Frost\\SHARED_HEAD.lt"
+IDR_FROST_POLICY RCDATA "models\\Frost\\POLICY.lt"

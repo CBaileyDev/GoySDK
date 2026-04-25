@@ -1,0 +1,7 @@
+After building internal_bot (internal_bot\build\GoySDK.dll and all DLLs next to it), run:
+
+  pwsh -File GoyLoader\scripts\Package-Payload.ps1
+
+from the repository root. That creates payload.zip in this folder. Rebuild GoyLoader so the zip is embedded in the EXE.
+
+The bot's .lt models are compiled into GoySDKCore.dll resources; this zip only needs the CMake output folder contents.

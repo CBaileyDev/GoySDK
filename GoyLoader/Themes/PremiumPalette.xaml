@@ -1,0 +1,482 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+        Loader theme — dark base, crimson accent, matching internal ImGui overlay.
+        Palette derived from the app icon: deep black + matrix red glow.
+    -->
+
+    <!-- ═══════════════ Core palette ═══════════════ -->
+    <Color x:Key="PalBg">#FF0A0A0F</Color>
+    <Color x:Key="PalBgRaised">#FF111118</Color>
+    <Color x:Key="PalBgCard">#FF0F0F16</Color>
+    <Color x:Key="PalBgFrame">#FF16161F</Color>
+    <Color x:Key="PalBgHover">#FF1C1C28</Color>
+    <Color x:Key="PalBorder">#FF1E1E2A</Color>
+    <Color x:Key="PalBorderLight">#FF282838</Color>
+
+    <Color x:Key="PalAccent">#FFD42B38</Color>
+    <Color x:Key="PalAccentHover">#FFE83545</Color>
+    <Color x:Key="PalAccentDim">#FF8C1C24</Color>
+    <Color x:Key="PalAccentGlow">#33D42B38</Color>
+
+    <Color x:Key="PalText">#FFE8E8F0</Color>
+    <Color x:Key="PalTextDim">#FF808098</Color>
+    <Color x:Key="PalTextMuted">#FF50506A</Color>
+
+    <Color x:Key="PalGreen">#FF38D975</Color>
+    <Color x:Key="PalWarn">#FFE8A830</Color>
+    <Color x:Key="PalErr">#FFFF4060</Color>
+
+    <!-- ═══════════════ Brush layer ═══════════════ -->
+
+    <!-- Window -->
+    <SolidColorBrush x:Key="BrushImGuiWindowBg" Color="{StaticResource PalBg}"/>
+    <SolidColorBrush x:Key="BrushLoaderTitleBar" Color="{StaticResource PalBgRaised}"/>
+    <SolidColorBrush x:Key="BrushLoaderTitleBarBorder" Color="{StaticResource PalBorder}"/>
+    <SolidColorBrush x:Key="BrushLoaderChromeHover" Color="{StaticResource PalBgHover}"/>
+    <SolidColorBrush x:Key="BrushLoaderChromeCloseHover" Color="#FFE81123"/>
+
+    <!-- Cards -->
+    <SolidColorBrush x:Key="BrushLoaderCard" Color="{StaticResource PalBgCard}"/>
+    <SolidColorBrush x:Key="BrushLoaderFooter" Color="#FF080810"/>
+
+    <!-- Accent strip under title bar — crimson gradient -->
+    <LinearGradientBrush x:Key="BrushLoaderTopAccent" StartPoint="0,0.5" EndPoint="1,0.5">
+        <GradientStop Color="#00D42B38" Offset="0"/>
+        <GradientStop Color="#FFD42B38" Offset="0.3"/>
+        <GradientStop Color="#FFE83545" Offset="0.5"/>
+        <GradientStop Color="#FFD42B38" Offset="0.7"/>
+        <GradientStop Color="#00D42B38" Offset="1"/>
+    </LinearGradientBrush>
+
+    <!-- ImGui-aligned brushes for code-behind FindResource -->
+    <SolidColorBrush x:Key="BrushImGuiChildBg" Color="{StaticResource PalBgRaised}"/>
+    <SolidColorBrush x:Key="BrushImGuiFrameBg" Color="{StaticResource PalBgFrame}"/>
+    <SolidColorBrush x:Key="BrushImGuiHoverBg" Color="{StaticResource PalBgHover}"/>
+    <SolidColorBrush x:Key="BrushImGuiBorder" Color="{StaticResource PalBorder}"/>
+    <SolidColorBrush x:Key="BrushImGuiBorderSolid" Color="{StaticResource PalBorderLight}"/>
+
+    <SolidColorBrush x:Key="BrushImGuiAccent" Color="{StaticResource PalAccent}"/>
+    <SolidColorBrush x:Key="BrushImGuiAccentDim" Color="{StaticResource PalAccentDim}"/>
+    <SolidColorBrush x:Key="BrushImGuiAccentBg" Color="{StaticResource PalAccentGlow}"/>
+
+    <SolidColorBrush x:Key="BrushImGuiText" Color="{StaticResource PalText}"/>
+    <SolidColorBrush x:Key="BrushImGuiTextDim" Color="{StaticResource PalTextDim}"/>
+    <SolidColorBrush x:Key="BrushImGuiTextMuted" Color="{StaticResource PalTextMuted}"/>
+
+    <SolidColorBrush x:Key="BrushImGuiGreen" Color="{StaticResource PalGreen}"/>
+    <SolidColorBrush x:Key="BrushImGuiWarn" Color="{StaticResource PalWarn}"/>
+    <SolidColorBrush x:Key="BrushImGuiErr" Color="{StaticResource PalErr}"/>
+
+    <SolidColorBrush x:Key="BrushLoaderOverlayScrim" Color="#E0050508"/>
+
+    <!-- ═══════════════ Typography ═══════════════ -->
+    <Style x:Key="ImGuiSectionTitle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+    </Style>
+
+    <Style x:Key="ImGuiLabel" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+    </Style>
+
+    <Style x:Key="ImGuiCaption" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiTextDim}"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="LineHeight" Value="18"/>
+    </Style>
+
+    <Style x:Key="ImGuiCompactLabel" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+    </Style>
+
+    <!-- ═══════════════ Separator ═══════════════ -->
+    <Style x:Key="ImGuiSeparator" TargetType="Border">
+        <Setter Property="Height" Value="1"/>
+        <Setter Property="Margin" Value="0,8,0,8"/>
+        <Setter Property="Background">
+            <Setter.Value>
+                <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                    <GradientStop Color="#001E1E2A" Offset="0"/>
+                    <GradientStop Color="#881E1E2A" Offset="0.5"/>
+                    <GradientStop Color="#001E1E2A" Offset="1"/>
+                </LinearGradientBrush>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ═══════════════ Buttons ═══════════════ -->
+    <Style x:Key="LoaderSecondaryButton" TargetType="Button">
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiTextDim}"/>
+        <Setter Property="Background" Value="{StaticResource BrushImGuiFrameBg}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BrushImGuiBorder}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="14,6"/>
+        <Setter Property="Margin" Value="0,0,8,0"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Outer"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="4"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Outer" Property="Background" Value="{StaticResource BrushImGuiHoverBg}"/>
+                            <Setter TargetName="Outer" Property="BorderBrush" Value="{StaticResource BrushImGuiBorderSolid}"/>
+                            <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Outer" Property="Background" Value="{StaticResource BrushImGuiAccentDim}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.35"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="LoaderPrimaryButton" TargetType="Button">
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Background" Value="{StaticResource BrushImGuiAccent}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BrushImGuiAccent}"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="Padding" Value="22,8"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Outer"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Outer" Property="Background" Value="{StaticResource BrushImGuiAccentDim}"/>
+                            <Setter TargetName="Outer" Property="BorderBrush" Value="#FFE83545"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Outer" Property="Background" Value="#FF6E1520"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.30"/>
+                            <Setter TargetName="Outer" Property="BorderBrush" Value="{StaticResource BrushImGuiBorder}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ImGuiPrimaryButton" TargetType="Button" BasedOn="{StaticResource LoaderPrimaryButton}"/>
+
+    <!-- ═══════════════ Implicit default button ═══════════════ -->
+    <Style TargetType="Button">
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+        <Setter Property="Background" Value="{StaticResource BrushImGuiFrameBg}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BrushImGuiBorderSolid}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="12,6"/>
+        <Setter Property="Margin" Value="0,0,8,0"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="bd"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="4"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="bd" Property="Background" Value="{StaticResource BrushImGuiHoverBg}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="bd" Property="Background" Value="{StaticResource BrushImGuiAccentDim}"/>
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource BrushImGuiAccentDim}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ═══════════════ Chrome caption buttons ═══════════════ -->
+    <Style x:Key="LoaderChromeCaptionButton" TargetType="Button">
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Width" Value="40"/>
+        <Setter Property="Height" Value="30"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="Margin" Value="0"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiTextMuted}"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+        <Setter Property="FontSize" Value="9"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="ChromeBg" Background="{TemplateBinding Background}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ChromeBg" Property="Background" Value="{StaticResource BrushLoaderChromeHover}"/>
+                            <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="LoaderChromeCloseButton" TargetType="Button" BasedOn="{StaticResource LoaderChromeCaptionButton}">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="ChromeBg" Background="{TemplateBinding Background}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ChromeBg" Property="Background" Value="{StaticResource BrushLoaderChromeCloseHover}"/>
+                            <Setter Property="Foreground" Value="White"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ═══════════════ ComboBox ═══════════════ -->
+    <Style TargetType="ComboBoxItem">
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Padding" Value="10,6"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                    <Border x:Name="ItemBd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="ItemBd" Property="Background" Value="{StaticResource BrushImGuiHoverBg}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="ComboBox">
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiText}"/>
+        <Setter Property="Background" Value="{StaticResource BrushImGuiFrameBg}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BrushImGuiBorderSolid}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Padding" Value="8,5"/>
+        <Setter Property="MinHeight" Value="32"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBox">
+                    <Grid SnapsToDevicePixels="True">
+                        <ToggleButton x:Name="ToggleChrome"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Stretch"
+                                      Focusable="False"
+                                      ClickMode="Press"
+                                      IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border x:Name="ComboBd"
+                                            Background="{StaticResource BrushImGuiFrameBg}"
+                                            BorderBrush="{StaticResource BrushImGuiBorderSolid}"
+                                            BorderThickness="1"
+                                            CornerRadius="4"/>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="ComboBd" Property="Background" Value="{StaticResource BrushImGuiHoverBg}"/>
+                                        </Trigger>
+                                        <Trigger Property="IsChecked" Value="True">
+                                            <Setter TargetName="ComboBd" Property="Background" Value="{StaticResource BrushImGuiHoverBg}"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <ContentPresenter x:Name="ContentSite"
+                                          IsHitTestVisible="False"
+                                          Margin="10,0,28,0"
+                                          VerticalAlignment="Center"
+                                          HorizontalAlignment="Left"
+                                          Content="{TemplateBinding SelectionBoxItem}"
+                                          ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                          ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
+                        <Path Data="M0,1 L4.5,6 L9,1"
+                              Stroke="{StaticResource BrushImGuiTextDim}"
+                              StrokeThickness="1.25"
+                              StrokeLineJoin="Miter"
+                              Fill="Transparent"
+                              HorizontalAlignment="Right"
+                              VerticalAlignment="Center"
+                              Margin="0,0,10,0"
+                              IsHitTestVisible="False"
+                              SnapsToDevicePixels="True"/>
+                        <Popup x:Name="PART_Popup"
+                               Placement="Bottom"
+                               IsOpen="{TemplateBinding IsDropDownOpen}"
+                               AllowsTransparency="True"
+                               Focusable="False"
+                               PopupAnimation="Fade">
+                            <Border Background="{StaticResource BrushImGuiChildBg}"
+                                    BorderBrush="{StaticResource BrushImGuiBorderSolid}"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                    MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                    Margin="0,2,0,0">
+                                <ScrollViewer SnapsToDevicePixels="True" Padding="2">
+                                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                </ScrollViewer>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ═══════════════ Toggle switch ═══════════════ -->
+    <Style x:Key="LoaderToggleSwitch" TargetType="ToggleButton">
+        <Setter Property="Width" Value="44"/>
+        <Setter Property="Height" Value="22"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Grid>
+                        <Border x:Name="Track" Width="44" Height="22" CornerRadius="11"
+                                Background="{StaticResource BrushImGuiFrameBg}"
+                                BorderBrush="{StaticResource BrushImGuiBorder}" BorderThickness="1"/>
+                        <Ellipse x:Name="Knob" Width="16" Height="16" Fill="White"
+                                 HorizontalAlignment="Left" Margin="3,0,0,0">
+                            <Ellipse.Effect>
+                                <DropShadowEffect BlurRadius="4" ShadowDepth="1" Opacity="0.3" Color="#000000"/>
+                            </Ellipse.Effect>
+                        </Ellipse>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Track" Property="Background" Value="{StaticResource BrushImGuiAccent}"/>
+                            <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource BrushImGuiAccent}"/>
+                            <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                            <Setter TargetName="Knob" Property="Margin" Value="0,0,3,0"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource BrushImGuiBorderSolid}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ═══════════════ Progress bar ═══════════════ -->
+    <Style TargetType="ProgressBar">
+        <Setter Property="Background" Value="{StaticResource BrushImGuiFrameBg}"/>
+        <Setter Property="Foreground" Value="{StaticResource BrushImGuiAccent}"/>
+        <Setter Property="Height" Value="4"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ProgressBar">
+                    <Grid x:Name="Root" ClipToBounds="True" SnapsToDevicePixels="True">
+                        <Border x:Name="PART_Track" CornerRadius="2" Background="{TemplateBinding Background}" Height="{TemplateBinding Height}"/>
+                        <Border x:Name="PART_Indicator" CornerRadius="2" Background="{TemplateBinding Foreground}" HorizontalAlignment="Left" Height="{TemplateBinding Height}" MinWidth="2"/>
+                        <Canvas x:Name="IndeterminateHost" Height="{TemplateBinding Height}" Visibility="Collapsed" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                            <Border x:Name="ShimmerBar" Width="80" Height="{TemplateBinding Height}" CornerRadius="2">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                        <GradientStop Color="#00D42B38" Offset="0"/>
+                                        <GradientStop Color="#AAD42B38" Offset="0.5"/>
+                                        <GradientStop Color="#00D42B38" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Border.RenderTransform>
+                                    <TranslateTransform x:Name="ShimmerX" X="-80"/>
+                                </Border.RenderTransform>
+                            </Border>
+                        </Canvas>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsIndeterminate" Value="True">
+                            <Setter TargetName="PART_Indicator" Property="Visibility" Value="Collapsed"/>
+                            <Setter TargetName="IndeterminateHost" Property="Visibility" Value="Visible"/>
+                            <Trigger.EnterActions>
+                                <BeginStoryboard Name="ShimmerSb">
+                                    <Storyboard RepeatBehavior="Forever">
+                                        <DoubleAnimation Storyboard.TargetName="ShimmerX" Storyboard.TargetProperty="X"
+                                                         From="-100" To="520" Duration="0:0:1.1">
+                                            <DoubleAnimation.EasingFunction>
+                                                <QuadraticEase EasingMode="EaseInOut"/>
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <StopStoryboard BeginStoryboardName="ShimmerSb"/>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

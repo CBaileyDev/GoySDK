@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>GoyLoader</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>GoyLoader</AssemblyName>
+    <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <PublishSingleFile Condition="'$(Configuration)' == 'Release'">true</PublishSingleFile>
+    <SelfContained Condition="'$(Configuration)' == 'Release'">true</SelfContained>
+    <RuntimeIdentifier Condition="'$(Configuration)' == 'Release'">win-x64</RuntimeIdentifier>
+    <!-- Bundle native WPF DLLs (wpfgfx, PresentationNative, etc.) inside the single exe -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- Release: no separate .pdb — the exe runs alone; copy only GoyLoader.exe to other PCs. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WPF pack:// URIs (Window.Icon, Image Source) need these as assembly resources; loose files are not next to single-file exe. -->
+    <Resource Include="Resources\AppIcon.png" />
+    <Resource Include="Resources\AppIcon.ico" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('Resources\payload.zip')">
+    <EmbeddedResource Include="Resources\payload.zip" LogicalName="GoyLoader.Payload.zip" />
+  </ItemGroup>
+
+  <Target Name="EnsurePayloadZipBeforePublish" BeforeTargets="Publish">
+    <Error
+      Text="Missing Resources\payload.zip. From repo root run: powershell -ExecutionPolicy Bypass -File GoyLoader\scripts\Package-Payload.ps1 (after building internal_bot), then publish again."
+      Condition="!Exists('$(MSBuildProjectDirectory)\Resources\payload.zip')" />
+  </Target>
+
+</Project>

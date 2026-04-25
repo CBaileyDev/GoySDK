@@ -1,0 +1,56 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+.cursor/
+
+# AI/agent metadata local to dev machine
+.claude/
+.superpowers/
+**/.superpowers/
+
+# Visual Studio / MSBuild output
+**/bin/
+**/obj/
+**/.vs/
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.aps
+*.ncb
+*.ipdb
+*.iobj
+
+# CMake build artifacts (does NOT exclude vendored static .libs)
+**/build/
+**/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# Embedded payload — 184 MB, exceeds GitHub's 100 MB file limit.
+# Regenerate with GoyLoader/scripts/Package-Payload.ps1 after building internal_bot.
+GoyLoader/Resources/payload.zip
+
+# Trained model weights — large binary blobs that are build inputs, not source.
+# These are embedded into GoySDKCore.dll via resources.rc.
+internal_bot/models/
+
+# Runtime logs / crash dumps / generator output
+*.log
+**/GoyLoaderBridge.log
+**/GoySDK.log
+**/GoyPayloadReport.txt
+*.dmp
+*.pdb
+
+# .NET publish output (in case it lands outside bin/)
+**/publish/

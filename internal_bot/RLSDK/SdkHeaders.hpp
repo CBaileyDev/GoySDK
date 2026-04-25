@@ -1,0 +1,60 @@
+/*
+#############################################################################################
+# UE import SDK (Season 22) (v2.66) - Confirmed offsets: GNames=0x2401648, GObjects=0x2401690
+# Generated with CodeRedGenerator v1.1.5 on 04/05/2026 03:56PM
+# ========================================================================================= #
+# File: SdkHeaders.hpp
+# ========================================================================================= #
+# Build fingerprint: 260316.80791.512269
+# Build Date: Mar 16 2026 23:04:23
+# ========================================================================================= #
+# Credits: ItsBranK, TheFeckless, SSLow
+# Links: www.github.com/CodeRedModding/CodeRed-Generator, discord.gg/d5ahhQmJbJ
+#############################################################################################
+*/
+#pragma once
+
+/*
+# ========================================================================================= #
+# Includes
+# ========================================================================================= #
+*/
+
+#include "GameDefines.hpp"
+#include "SDK_HEADERS/Core_structs.hpp"
+#include "SDK_HEADERS/Core_classes.hpp"
+#include "SDK_HEADERS/Core_parameters.hpp"
+#include "SDK_HEADERS/Engine_structs.hpp"
+#include "SDK_HEADERS/Engine_classes.hpp"
+#include "SDK_HEADERS/Engine_parameters.hpp"
+#include "SDK_HEADERS/IpDrv_structs.hpp"
+#include "SDK_HEADERS/IpDrv_classes.hpp"
+#include "SDK_HEADERS/IpDrv_parameters.hpp"
+#include "SDK_HEADERS/XAudio2_structs.hpp"
+#include "SDK_HEADERS/XAudio2_classes.hpp"
+#include "SDK_HEADERS/XAudio2_parameters.hpp"
+#include "SDK_HEADERS/GFxUI_structs.hpp"
+#include "SDK_HEADERS/GFxUI_classes.hpp"
+#include "SDK_HEADERS/GFxUI_parameters.hpp"
+#include "SDK_HEADERS/AkAudio_structs.hpp"
+#include "SDK_HEADERS/AkAudio_classes.hpp"
+#include "SDK_HEADERS/AkAudio_parameters.hpp"
+#include "SDK_HEADERS/WinDrv_structs.hpp"
+#include "SDK_HEADERS/WinDrv_classes.hpp"
+#include "SDK_HEADERS/WinDrv_parameters.hpp"
+#include "SDK_HEADERS/OnlineSubsystemEOS_structs.hpp"
+#include "SDK_HEADERS/OnlineSubsystemEOS_classes.hpp"
+#include "SDK_HEADERS/OnlineSubsystemEOS_parameters.hpp"
+#include "SDK_HEADERS/ProjectX_structs.hpp"
+#include "SDK_HEADERS/ProjectX_classes.hpp"
+#include "SDK_HEADERS/ProjectX_parameters.hpp"
+#include "SDK_HEADERS/TAGame_structs.hpp"
+#include "SDK_HEADERS/TAGame_classes.hpp"
+#include "SDK_HEADERS/TAGame_parameters.hpp"
+#include "SDK_HEADERS/Extras.hpp"
+
+/*
+# ========================================================================================= #
+#
+# ========================================================================================= #
+*/
