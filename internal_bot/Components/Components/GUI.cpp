@@ -1239,7 +1239,8 @@ void GUIComponent::Render()
     GUI.DisplayX = IO.DisplaySize.x;
     GUI.DisplayY = IO.DisplaySize.y;
 
-    if (OverlayMod.IsInGame) OverlayMod.OnRender();
+    // P1/07: OnRender now does its own locked state check; no need to gate here.
+    OverlayMod.OnRender();
 
     BotMod.TickJoinCountdowns();
 

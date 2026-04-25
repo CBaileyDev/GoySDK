@@ -10,6 +10,11 @@ internal static class NativeMethods
     public const uint PageReadwrite = 0x04;
     public const uint Infinite = 0xFFFFFFFF;
 
+    // P2/03: explicit WaitForSingleObject result codes for readable handling.
+    public const uint WaitObject0 = 0x00000000;
+    public const uint WaitTimeout = 0x00000102;
+    public const uint WaitFailed  = 0xFFFFFFFF;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
@@ -37,11 +42,16 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
+    // P2/03: thread exit codes are 32-bit DWORDs even on x64. The previous
+    // `out IntPtr` signature hid the truncation; declaring it as `out uint`
+    // makes callers treat the value as a success signal, not a HMODULE.
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool GetExitCodeThread(IntPtr hThread, out IntPtr lpExitCode);
+    public static extern bool GetExitCodeThread(IntPtr hThread, out uint lpExitCode);
 
+    // P2/04: lphModule must be nullable so the size-discovery first call can
+    // legally pass `null` with cb == 0 under nullable-reference-types.
     [DllImport("psapi.dll", SetLastError = true)]
-    public static extern bool EnumProcessModulesEx(IntPtr hProcess, [Out] IntPtr[] lphModule, uint cb, out uint lpcbNeeded, uint dwFilterFlag);
+    public static extern bool EnumProcessModulesEx(IntPtr hProcess, [Out] IntPtr[]? lphModule, uint cb, out uint lpcbNeeded, uint dwFilterFlag);
 
     [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern uint GetModuleFileNameExW(IntPtr hProcess, IntPtr hModule, [Out] System.Text.StringBuilder lpFilename, uint nSize);

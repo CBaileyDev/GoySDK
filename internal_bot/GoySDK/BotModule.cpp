@@ -62,6 +62,7 @@ std::mutex                    BotModule::guiMutex_;
 PhysSnapshot                  BotModule::ballSnapshot_{};
 std::vector<PlayerSnapshot>   BotModule::allPlayers_;
 std::array<BoostPadState, 34> BotModule::padStates_;
+MatchStateSnapshot            BotModule::matchState_{};
 std::array<std::chrono::steady_clock::time_point, 34> BotModule::padPickupTimes_;
 std::array<bool, 34>          BotModule::padWasAvailable_;
 bool                          BotModule::isKickoff_ = false;
@@ -133,6 +134,13 @@ bool BotModule::IsViGEmInputAvailable() {
 
 bool BotModule::IsCudaInferenceAvailable() {
     return torch::cuda::is_available();
+}
+
+std::array<BoostPadState, 34> BotModule::GetPadStates() {
+    // P1/01: snapshot under the writer's lock so the overlay (which holds its
+    // own dataMutex) can't read torn BoostPadState values mid-update.
+    std::lock_guard<std::mutex> lock(guiMutex_);
+    return padStates_;
 }
 
 void BotModule::SetInferenceBackend(InferenceBackend backend) {
@@ -268,11 +276,31 @@ bool BotModule::LoadBotForSlot(int slotIdx, int modelIdx) {
             "",
             slot.config.sharedHeadSizes,
             slot.config.tickSkip,
-            false, 
+            false,
             slot.config.GetExpectedObsCount(),
             slot.config.policySizes,
             slot.config.useLeakyRelu
         );
+
+        // P0/06: inject GoySDK's discrete action table so RLInference doesn't
+        // keep its own copy that can drift from the policy's training-time
+        // action ordering. Bot::forward asserts size against the policy output
+        // dim, so a missing table is a hard failure instead of silent neutral.
+        {
+            const auto& src = GetDefaultDiscreteActions();
+            botCfg.discrete_actions.reserve(src.size());
+            for (const auto& action : src) {
+                botCfg.discrete_actions.push_back(ToActionOutput(action));
+            }
+        }
+        if (botCfg.discrete_actions.empty()) {
+            Console.Error("[GoySDK] Discrete action table is empty; refusing to load bot for slot " +
+                          std::to_string(slotIdx) + ".");
+            slot.modelIdx = -1;
+            modelLoading_ = false;
+            return false;
+        }
+
         botCfg.primary_model_data = sharedData;
         botCfg.primary_model_size = sharedSize;
         botCfg.secondary_model_data = policyData;
@@ -532,7 +560,13 @@ bool BotModule::IsGameEventValid() {
 void BotModule::OnGameEventStart(PreEvent& event) {
     try {
         if (event.Caller() && event.Caller()->IsA(AGameEvent_Soccar_TA::StaticClass())) {
-            gameEvent_ = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+            // P1/03: lock the publish so PlayerTickCalled (snapshot reader) can't
+            // observe a half-published pointer.
+            {
+                std::lock_guard<std::mutex> lock(guiMutex_);
+                gameEvent_ = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+                matchState_ = {};
+            }
             Console.Write("[GoySDK] Game event captured.");
         }
     } catch (const std::exception& e) {
@@ -544,7 +578,13 @@ void BotModule::OnGameEventStart(PreEvent& event) {
 
 void BotModule::OnGameEventDestroyed(PreEvent& event) {
     (void)event;
-    gameEvent_ = nullptr;
+    // P1/03: lock the clear of gameEvent_ + matchState_ so a tick that snapshots
+    // the pointer can't see a stale value paired with a fresh snapshot.
+    {
+        std::lock_guard<std::mutex> lock(guiMutex_);
+        gameEvent_ = nullptr;
+        matchState_ = {};
+    }
     botActive_.store(false);
     localPlayerCount_ = 0;
     lastFrameTickCount_ = -1;
@@ -571,17 +611,47 @@ void BotModule::OnGameEventDestroyed(PreEvent& event) {
 }
 
 
+// P1/03: Build a plain-data snapshot of game-event scalars under SEH so
+// any fault during the read is contained and the snapshot is marked invalid
+// instead of partially filled.
+static GoySDK::MatchStateSnapshot BuildMatchStateSnapshot(AGameEvent_Soccar_TA* gevt) {
+    GoySDK::MatchStateSnapshot snapshot{};
+    if (!gevt) return snapshot;
+
+    __try {
+        snapshot.valid = true;
+        snapshot.inReplayPlayback = gevt->IsInReplayPlayback();
+        snapshot.canVoteToForfeit = gevt->bCanVoteToForfeit != 0;
+        snapshot.gameStateTimeRemaining = gevt->GameStateTimeRemaining;
+
+        auto teams = gevt->Teams;
+        if (teams.size() >= 2) {
+            snapshot.teamScores[0] = teams[0] ? teams[0]->Score : 0;
+            snapshot.teamScores[1] = teams[1] ? teams[1]->Score : 0;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snapshot = {};
+    }
+
+    return snapshot;
+}
+
 void BotModule::SyncLocalPlayers() {
     localPlayerCount_ = 0;
 
-    if (!gameEvent_) {
+    // P1/03: capture gameEvent_ once per call. The pointer can still dangle if
+    // Unreal destroys the object — the caller holds guiMutex_ which protects
+    // the pointer field, not the engine object's lifetime — so subsequent
+    // reads are still raw engine reads, just centralized.
+    AGameEvent_Soccar_TA* gevt = gameEvent_;
+    if (!gevt) {
         for (auto& slot : playerSlots_) {
             slot.assignedPC = nullptr;
         }
         return;
     }
 
-    TArray<APlayerController_TA*> localPlayers = gameEvent_->LocalPlayers;
+    TArray<APlayerController_TA*> localPlayers = gevt->LocalPlayers;
     localPlayerCount_ = std::min(static_cast<int>(localPlayers.size()), kMaxSlots);
 
     for (int i = 0; i < kMaxSlots; ++i) {
@@ -616,45 +686,62 @@ void BotModule::PlayerTickCalled(const PostEvent& event) {
                     SyncLocalPlayers();
                     ReadGameState(pc);
                     ReadBoostPads();
+
+                    // P1/02: kickoff state is per-MATCH, not per-slot. Update
+                    // it exactly once per game tick here. Previously this lived
+                    // in RunSlotInferenceTick and ran N× per tick (once per
+                    // active bot slot), so the kickoffTimer_ < 2.5f window
+                    // expired in 2.5/N seconds with N active bots.
+                    const float ballXY = sqrtf(ballSnapshot_.pos.X * ballSnapshot_.pos.X +
+                                               ballSnapshot_.pos.Y * ballSnapshot_.pos.Y);
+                    const float ballSpeed = sqrtf(ballSnapshot_.vel.X * ballSnapshot_.vel.X +
+                                                  ballSnapshot_.vel.Y * ballSnapshot_.vel.Y +
+                                                  ballSnapshot_.vel.Z * ballSnapshot_.vel.Z);
+                    const bool wasKickoff = isKickoff_;
+                    isKickoff_ = (ballXY < 100.0f) && (ballSpeed < 50.0f);
+                    if (isKickoff_ && !wasKickoff) {
+                        kickoffTimer_ = 0.0f;
+                    }
+                    if (isKickoff_) {
+                        kickoffTimer_ += 1.0f / 120.0f;
+                    }
                 }
             }
         }
 
-       
+        // P1/03: read automation state from the per-frame snapshot instead of
+        // late-dereferencing gameEvent_ (which can be destroyed between the
+        // top-of-tick guard and these blocks).
         if (playerSlots_[0].assignedPC == pc) {
             if (skipReplayCooldown_ > 0) skipReplayCooldown_--;
 
-            if (autoSkipReplay_ && skipReplayCooldown_ <= 0) {
-                try {
-                    if (gameEvent_->IsInReplayPlayback()) {
-                        pc->bOverrideInput = 1;
-                        pc->OverrideInput.bJump = 1;
-                        skipReplayCooldown_ = 30;
-                    }
-                } catch (const std::exception& e) {
-                    Console.Error(std::string("[GoySDK] Exception in auto-skip replay: ") + e.what());
-                } catch (...) {
-                    Console.Error("[GoySDK] Unknown exception in auto-skip replay");
-                }
+            const MatchStateSnapshot matchState = matchState_;
+
+            if (autoSkipReplay_ && skipReplayCooldown_ <= 0 &&
+                matchState.valid && matchState.inReplayPlayback) {
+                pc->bOverrideInput = 1;
+                pc->OverrideInput.bJump = 1;
+                skipReplayCooldown_ = 30;
             }
 
-           
-            if (autoForfeit_ && !forfeitVotedThisMatch_ && gameEvent_->bCanVoteToForfeit) {
+            if (autoForfeit_ && !forfeitVotedThisMatch_ &&
+                matchState.valid && matchState.canVoteToForfeit) {
                 try {
                     APRI_TA* localPRI = pc->PRI;
-                    int timeRemaining = gameEvent_->GameStateTimeRemaining;
-                    auto teams = gameEvent_->Teams;
-                    if (teams.size() >= 2 && localPRI && localPRI->Team) {
-                        int myTeamIdx = localPRI->Team->TeamIndex;
-                        int myScore = teams[myTeamIdx]->Score;
-                        int oppScore = teams[1 - myTeamIdx]->Score;
-                        int diff = oppScore - myScore;
-                        if (diff >= autoForfeitScoreDiff_ && timeRemaining <= autoForfeitTimeSec_) {
-                            auto* myTeam = static_cast<ATeam_TA*>(localPRI->Team);
-                            if (myTeam) {
-                                myTeam->VoteToForfeit(localPRI);
-                                forfeitVotedThisMatch_ = true;
-                                Console.Notify("[GoySDK] Auto-forfeit vote cast (down " + std::to_string(diff) + ", " + std::to_string(timeRemaining) + "s left)");
+                    const int timeRemaining = matchState.gameStateTimeRemaining;
+                    if (localPRI && localPRI->Team) {
+                        const int myTeamIdx = localPRI->Team->TeamIndex;
+                        if (myTeamIdx >= 0 && myTeamIdx <= 1) {
+                            const int myScore = matchState.teamScores[myTeamIdx];
+                            const int oppScore = matchState.teamScores[1 - myTeamIdx];
+                            const int diff = oppScore - myScore;
+                            if (diff >= autoForfeitScoreDiff_ && timeRemaining <= autoForfeitTimeSec_) {
+                                auto* myTeam = static_cast<ATeam_TA*>(localPRI->Team);
+                                if (myTeam) {
+                                    myTeam->VoteToForfeit(localPRI);
+                                    forfeitVotedThisMatch_ = true;
+                                    Console.Notify("[GoySDK] Auto-forfeit vote cast (down " + std::to_string(diff) + ", " + std::to_string(timeRemaining) + "s left)");
+                                }
                             }
                         }
                     }
@@ -693,11 +780,27 @@ void BotModule::PlayerTickCalled(const PostEvent& event) {
 
 void BotModule::ReadGameState(APlayerController_TA* anyPC) {
     (void)anyPC;
-    if (!IsGameEventValid()) return;
+    if (!IsGameEventValid()) {
+        // P1/03: invalidate the snapshot so automation can't act on stale data.
+        matchState_ = {};
+        return;
+    }
+
+    // P1/03: capture gameEvent_ once. The caller (PlayerTickCalled first-slot
+    // block) already holds guiMutex_, so do NOT re-lock or you'll deadlock the
+    // non-recursive mutex.
+    AGameEvent_Soccar_TA* gevt = gameEvent_;
+    if (!gevt) {
+        matchState_ = {};
+        return;
+    }
+
+    // Refresh per-frame match-state snapshot for automation consumers.
+    matchState_ = BuildMatchStateSnapshot(gevt);
+
     allPlayers_.clear();
 
-   
-    TArray<ABall_TA*> balls = gameEvent_->GameBalls;
+    TArray<ABall_TA*> balls = gevt->GameBalls;
     if (balls.size() > 0 && balls[0]) {
         ABall_TA* ball = balls[0];
         ballSnapshot_.pos    = ball->Location;
@@ -707,8 +810,7 @@ void BotModule::ReadGameState(APlayerController_TA* anyPC) {
         ballSnapshot_.rotMat = ObsBuilder::RotatorToMatrix(ball->Rotation);
     }
 
-   
-    TArray<ACar_TA*> cars = gameEvent_->Cars;
+    TArray<ACar_TA*> cars = gevt->Cars;
     for (int i = 0; i < static_cast<int>(cars.size()); i++) {
         ACar_TA* car = cars[i];
         if (!car) continue;
@@ -823,26 +925,12 @@ void BotModule::RunSlotInferenceTick(int slotIdx, APlayerController_TA* pc) {
 
     slot.tickCounter++;
 
-   
-    const float ballXY = sqrtf(ballSnapshot_.pos.X * ballSnapshot_.pos.X +
-                                ballSnapshot_.pos.Y * ballSnapshot_.pos.Y);
-    const float ballSpeed = sqrtf(ballSnapshot_.vel.X * ballSnapshot_.vel.X +
-                                   ballSnapshot_.vel.Y * ballSnapshot_.vel.Y +
-                                   ballSnapshot_.vel.Z * ballSnapshot_.vel.Z);
-
-    bool wasKickoff = isKickoff_;
-    isKickoff_ = (ballXY < 100.0f) && (ballSpeed < 50.0f);
-
-    if (isKickoff_ && !wasKickoff) {
-        kickoffTimer_ = 0.0f;
-    }
-    if (isKickoff_) {
-        kickoffTimer_ += 1.0f / 120.0f;
-    }
-
-    int effectiveTickSkip = (isKickoff_ && kickoffTimer_ < 2.5f)
-                            ? slot.config.kickoffTickSkip
-                            : slot.config.tickSkip;
+    // P1/02: isKickoff_ / kickoffTimer_ are now updated once per game tick
+    // inside the first-slot block of PlayerTickCalled. This function only
+    // consumes them.
+    const int effectiveTickSkip = (isKickoff_ && kickoffTimer_ < 2.5f)
+                                  ? slot.config.kickoffTickSkip
+                                  : slot.config.tickSkip;
 
     bool shouldInfer = (slot.tickCounter % effectiveTickSkip == 0);
 
@@ -882,20 +970,28 @@ void BotModule::RunSlotInferenceTick(int slotIdx, APlayerController_TA* pc) {
         return;
     }
 
-   
     slot.bot->obs().clear();
     for (float val : obs) {
         slot.bot->push_obs(val);
     }
 
-   
-    if (!slot.bot->forward()) {
-        if (diag) Console.Write("[GoySDK] S" + std::to_string(slotIdx) + " forward() false");
+    // P0/05: apply the action mask BEFORE sampling/argmax so the policy samples
+    // from softmax-over-allowed-actions (its training-time distribution),
+    // instead of sampling unmasked and then deterministically repairing.
+    const std::vector<uint8_t> actionMask = BuildDefaultActionMask(slot.localSnapshot);
+    if (!slot.bot->forward(actionMask)) {
+        if (diag) {
+            Console.Error("[GoySDK] S" + std::to_string(slotIdx) +
+                          " forward(mask) false mask=" + std::to_string(actionMask.size()));
+        }
+        // Don't hold a stale lastAction when the masked path detects a real
+        // mismatch — emit neutral so the controller actually goes idle.
+        slot.lastAction.fill(0.f);
+        ApplySlotInput(slotIdx, pc, 0.f, 0.f, 0.f, 0.f, 0.f, false, false, false);
         return;
     }
 
     RLInference::ActionOutput action = slot.bot->get_last_output();
-    const RLInference::ActionOutput policyAction = action;
     const RLInference::InferenceDebugInfo policyDebug = slot.bot->get_last_debug();
 
     if (diag) {
@@ -907,13 +1003,8 @@ void BotModule::RunSlotInferenceTick(int slotIdx, APlayerController_TA* pc) {
             " jmp=" + std::to_string(action.jump) +
             " bst=" + std::to_string(action.boost));
     }
-
-    if (policyDebug.available) {
-        const int maskedActionIndex = SelectMaskedDiscreteActionIndex(policyDebug.logits, slot.localSnapshot);
-        if (maskedActionIndex >= 0 && maskedActionIndex != policyDebug.action_index) {
-            action = ToActionOutput(maskedActionIndex);
-        }
-    }
+    // P0/05: post-hoc mask repair removed — the mask is now applied inside
+    // Bot::forward(mask). The clamps below remain as cheap safety nets.
 
    
     if (slot.localSnapshot.boost <= 0.01f) {

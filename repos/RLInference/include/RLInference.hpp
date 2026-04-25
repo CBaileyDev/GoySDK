@@ -3,6 +3,7 @@
 #include <ActionOutput.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +37,11 @@ struct BotConfig {
     std::size_t primary_model_size = 0;
     const void* secondary_model_data = nullptr;
     std::size_t secondary_model_size = 0;
+
+    /// Host-provided discrete action table. `discrete_actions[i]` is the controller
+    /// output corresponding to policy logit index `i`. This must match the policy's
+    /// training-time action ordering and the final policy output dimension.
+    std::vector<ActionOutput> discrete_actions{};
 
     BotConfig() = default;
 
@@ -76,10 +82,19 @@ public:
 
     bool forward();
 
+    /// Runs inference after applying a per-call discrete action mask.
+    ///
+    /// `actionMask.size()` must equal the policy output dimension. Entries with
+    /// value 0 are forbidden and get their logits set to -infinity before argmax
+    /// or sampling. Returns false on shape mismatch or fully-masked input.
+    bool forward(const std::vector<uint8_t>& actionMask);
+
     ActionOutput get_last_output() const { return last_output_; }
     InferenceDebugInfo get_last_debug() const { return last_debug_; }
 
 private:
+    bool forward_impl(const std::vector<uint8_t>* actionMask);
+
     BotConfig config_{};
     std::vector<float> obs_{};
     ActionOutput last_output_{};

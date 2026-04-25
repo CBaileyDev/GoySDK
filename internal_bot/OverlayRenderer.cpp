@@ -146,8 +146,15 @@ std::vector<BallPredictionSample> BuildPredictionSamples(ABall_TA* ball,
 
 } // namespace
 
-bool OverlayRenderer::IsInGame = false;
-AGameEvent_Soccar_TA* OverlayRenderer::CurrentGameEvent = nullptr;
+// P1/07: private state, accessed only under dataMutex.
+bool OverlayRenderer::isInGame_ = false;
+AGameEvent_Soccar_TA* OverlayRenderer::currentGameEvent_ = nullptr;
+
+bool OverlayRenderer::IsInGameActive() {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    return isInGame_;
+}
+
 std::vector<CarBoostData> OverlayRenderer::carBoostData;
 std::vector<FVector> OverlayRenderer::ballScreenPositions;
 APRI_TA* OverlayRenderer::localPlayerPRI = nullptr;
@@ -177,11 +184,15 @@ void OverlayRenderer::Hook() {
 
 void OverlayRenderer::OnGameEventDestroyed(PreEvent& event)
 {
+    (void)event;
     try
     {
         std::lock_guard<std::mutex> lock(dataMutex);
-        CurrentGameEvent = nullptr;
-        IsInGame = false;
+        // P1/07: clear isInGame_ before nulling the pointer so even an
+        // imaginary unlocked reader sees "not in game" first.
+        isInGame_ = false;
+        currentGameEvent_ = nullptr;
+        localPlayerPRI = nullptr;
         carBoostData.clear();
         ballScreenPositions.clear();
         ballPredictionSamples.clear();
@@ -197,34 +208,43 @@ void OverlayRenderer::OnGameEventStart(PreEvent& event)
         Console.Write("GameEventHook: Game event started: " + std::string(event.Function()->GetName()));
         if (event.Caller() && event.Caller()->IsA(AGameEvent_Soccar_TA::StaticClass()))
         {
-            CurrentGameEvent = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+            // P1/07: only flip isInGame_ when we actually captured the event.
+            std::lock_guard<std::mutex> lock(dataMutex);
+            currentGameEvent_ = static_cast<AGameEvent_Soccar_TA*>(event.Caller());
+            isInGame_ = true;
             Console.Write("GameEventHook: Stored GameEvent instance");
         }
-        IsInGame = true;
     }
     catch (...) { Console.Error("GameEventHook: Exception in OnGameEventStart"); }
 }
 
 void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
-    if (!IsInGame || !CurrentGameEvent || !event.Caller() || !event.Caller()->IsA(APlayerController_TA::StaticClass())) {
+    if (!event.Caller() || !event.Caller()->IsA(APlayerController_TA::StaticClass())) {
         return;
     }
 
+    // P1/07: take the lock FIRST, then snapshot state, so a concurrent destroy
+    // can't null currentGameEvent_ between a check and the dereference.
     std::lock_guard<std::mutex> lock(dataMutex);
+    if (!isInGame_ || !currentGameEvent_) {
+        return;
+    }
+    AGameEvent_Soccar_TA* gevt = currentGameEvent_;
+
     carBoostData.clear();
     ballScreenPositions.clear();
     ballPredictionSamples.clear();
     boostTimerBadges.clear();
 
-    TArray<APlayerController_TA*> localPlayers = CurrentGameEvent->LocalPlayers;
+    TArray<APlayerController_TA*> localPlayers = gevt->LocalPlayers;
     if (localPlayers.size() == 0 || !localPlayers[0]) {
         return;
     }
     APlayerController_TA* localPlayerController = localPlayers[0];
     localPlayerPRI = localPlayerController->PRI;
 
-    TArray<ACar_TA*> cars = CurrentGameEvent->Cars;
-    TArray<ABall_TA*> balls = CurrentGameEvent->GameBalls;
+    TArray<ACar_TA*> cars = gevt->Cars;
+    TArray<ABall_TA*> balls = gevt->GameBalls;
 
     for (APlayerController_TA* localPlayer : localPlayers) {
        
@@ -300,7 +320,8 @@ void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
     }
 
     if (drawBoostTimers) {
-        const auto& padStates = BotMod.GetPadStates();
+        // P1/01: GetPadStates now returns a snapshot taken under guiMutex_.
+        const std::array<BoostPadState, 34> padStates = BotMod.GetPadStates();
         for (int i = 0; i < 34; i++) {
             if (padStates[i].available) {
                 continue;
@@ -320,11 +341,12 @@ void OverlayRenderer::PlayerTickCalled(const PostEvent& event) {
 }
 
 void OverlayRenderer::OnRender() {
-    if (!IsInGame) {
+    // P1/07: lock first, then check state. The previous unlocked check could
+    // see a stale "true" while caches were being torn down by OnGameEventDestroyed.
+    std::lock_guard<std::mutex> lock(dataMutex);
+    if (!isInGame_) {
         return;
     }
-
-    std::lock_guard<std::mutex> lock(dataMutex);
 
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
 

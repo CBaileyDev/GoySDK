@@ -48,14 +48,35 @@ public static class DllInjector
             if (hThread == IntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRemoteThread failed.");
 
+            // P2/03: handle each WaitForSingleObject result code distinctly so the
+            // user sees an accurate failure mode instead of a generic timeout.
             var wait = NativeMethods.WaitForSingleObject(hThread, 30_000);
-            if (wait != 0)
-                throw new TimeoutException("Remote LoadLibraryW did not complete in time.");
+            switch (wait)
+            {
+                case NativeMethods.WaitObject0:
+                    break;
+                case NativeMethods.WaitTimeout:
+                    throw new TimeoutException("Remote LoadLibraryW did not complete in 30 seconds.");
+                case NativeMethods.WaitFailed:
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject failed.");
+                default:
+                    throw new InvalidOperationException($"Unexpected WaitForSingleObject result: 0x{wait:X8}.");
+            }
 
-            if (!NativeMethods.GetExitCodeThread(hThread, out var exitCode) || exitCode == IntPtr.Zero)
+            // P2/03: GetExitCodeThread truncates the HMODULE to 32 bits on x64,
+            // so we treat its return only as a "non-zero == LoadLibrary returned
+            // a valid handle" signal. For the actual handle, enumerate modules.
+            if (!NativeMethods.GetExitCodeThread(hThread, out var exitCode))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetExitCodeThread failed.");
+            if (exitCode == 0)
                 throw new InvalidOperationException("LoadLibraryW returned NULL in the target process (missing dependencies or wrong architecture).");
 
-            return exitCode;
+            var realHandle = FindModuleHandle(processId, absoluteDllPath);
+            if (realHandle == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    $"LoadLibraryW reported success but '{Path.GetFileName(absoluteDllPath)}' was not found in the target's module list.");
+
+            return realHandle;
         }
         finally
         {
@@ -69,35 +90,82 @@ public static class DllInjector
 
     public static bool IsModuleLoaded(int processId, string moduleFileName)
     {
-        var hProcess = NativeMethods.OpenProcess(NativeMethods.ProcessQueryInformation | NativeMethods.ProcessVmRead, false, processId);
+        return FindModuleHandle(processId, moduleFileName) != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// P2/03: enumerate the target process's modules and return the full HMODULE
+    /// for one whose path matches <paramref name="expectedDllPathOrName"/>. Pass
+    /// either an absolute path (preferred — matched by canonicalized full path)
+    /// or a bare file name (matched case-insensitive against each module's name).
+    /// Returns IntPtr.Zero if no match was found or the target couldn't be opened.
+    /// </summary>
+    public static IntPtr FindModuleHandle(int processId, string expectedDllPathOrName)
+    {
+        var expectedFullPath = Path.IsPathRooted(expectedDllPathOrName)
+            ? Path.GetFullPath(expectedDllPathOrName)
+            : null;
+        var expectedFileName = Path.GetFileName(expectedDllPathOrName);
+        if (string.IsNullOrWhiteSpace(expectedFileName))
+            return IntPtr.Zero;
+
+        var hProcess = NativeMethods.OpenProcess(
+            NativeMethods.ProcessQueryInformation | NativeMethods.ProcessVmRead,
+            false, processId);
         if (hProcess == IntPtr.Zero)
-            return false;
+            return IntPtr.Zero;
 
         try
         {
             uint needed = 0;
-            // first call to get needed size
-            NativeMethods.EnumProcessModulesEx(hProcess, null, 0, out needed, NativeMethods.LIST_MODULES_DEFAULT);
+            // P2/04: EnumProcessModulesEx now declares lphModule nullable; passing
+            // null is the documented size-discovery pattern.
+            NativeMethods.EnumProcessModulesEx(hProcess, (IntPtr[]?)null, 0, out needed, NativeMethods.LIST_MODULES_DEFAULT);
             if (needed == 0)
-                return false;
+                return IntPtr.Zero;
 
             var count = needed / (uint)IntPtr.Size;
             var modules = new IntPtr[count];
             if (!NativeMethods.EnumProcessModulesEx(hProcess, modules, needed, out needed, NativeMethods.LIST_MODULES_DEFAULT))
-                return false;
+                return IntPtr.Zero;
 
-            var sb = new System.Text.StringBuilder(260);
-            foreach (var m in modules)
+            var sb = new System.Text.StringBuilder(1024);
+            foreach (var module in modules)
             {
                 sb.Clear();
-                NativeMethods.GetModuleFileNameExW(hProcess, m, sb, (uint)sb.Capacity);
+                NativeMethods.GetModuleFileNameExW(hProcess, module, sb, (uint)sb.Capacity);
                 if (sb.Length == 0)
                     continue;
-                if (Path.GetFileName(sb.ToString()).Equals(moduleFileName, StringComparison.OrdinalIgnoreCase))
-                    return true;
+
+                var modulePath = sb.ToString();
+                if (expectedFullPath != null)
+                {
+                    try
+                    {
+                        if (string.Equals(
+                                Path.GetFullPath(modulePath),
+                                expectedFullPath,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            return module;
+                        }
+                    }
+                    catch
+                    {
+                        // Fall back to file-name match below.
+                    }
+                }
+
+                if (string.Equals(
+                        Path.GetFileName(modulePath),
+                        expectedFileName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return module;
+                }
             }
 
-            return false;
+            return IntPtr.Zero;
         }
         finally
         {

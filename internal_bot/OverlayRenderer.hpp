@@ -47,9 +47,9 @@ public:
 
     static void Initialize();
 
-    static bool IsInGame;
-    static AGameEvent_Soccar_TA* CurrentGameEvent;
-
+    /// P1/07: thread-safe query for "is the overlay tracking a live game event?"
+    /// Acquires dataMutex internally. Use this instead of reading a public flag.
+    static bool IsInGameActive();
 
     // Overlay toggles
     static bool showMyBoost;
@@ -71,6 +71,13 @@ public:
     static std::vector<BallPredictionSample> ballPredictionSamples;
     static std::vector<BoostTimerBadge> boostTimerBadges;
     static APRI_TA* localPlayerPRI;
+
+private:
+    // P1/07: previously public statics read without locking. Now only touched
+    // while holding dataMutex. Atomic alone wouldn't help since CurrentGameEvent
+    // points to an Unreal-owned object whose lifetime we don't control.
+    static bool isInGame_;
+    static AGameEvent_Soccar_TA* currentGameEvent_;
 };
 
 extern class OverlayRenderer OverlayMod;

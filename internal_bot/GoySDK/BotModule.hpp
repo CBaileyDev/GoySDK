@@ -18,6 +18,18 @@ namespace GoySDK {
 /// Soccer-field boost pad world positions (shared with ObsBuilder / overlay).
 extern const FVector BOOST_LOCATIONS[34];
 
+/// Per-frame snapshot of plain values copied out of the Unreal AGameEvent_Soccar_TA
+/// during ReadGameState. Automation code (auto-skip-replay, auto-forfeit) consumes
+/// this instead of late-dereferencing `gameEvent_` (P1/03). `valid == false` means
+/// the snapshot read faulted or no game event is active; consumers should no-op.
+struct MatchStateSnapshot {
+    bool valid = false;
+    bool inReplayPlayback = false;
+    bool canVoteToForfeit = false;
+    int gameStateTimeRemaining = 0;
+    int teamScores[2] = {0, 0};
+};
+
 struct PlayerBotSlot {
     int modelIdx = -1; 
     std::unique_ptr<RLInference::Bot> bot;
@@ -120,6 +132,8 @@ private:
     static PhysSnapshot                  ballSnapshot_;
     static std::vector<PlayerSnapshot>   allPlayers_;
     static std::array<BoostPadState, 34> padStates_;
+    /// P1/03: per-frame snapshot of game-event scalars used by automation.
+    static MatchStateSnapshot            matchState_;
 
    
     static std::array<std::chrono::steady_clock::time_point, 34> padPickupTimes_;
@@ -163,7 +177,11 @@ public:
     static int&  AutoForfeitTimeSec()   { return autoForfeitTimeSec_; }
     static bool& AutoRequeue()          { return autoRequeue_; }
     static bool& AutoChat()             { return autoChat_; }
-    static const std::array<BoostPadState, 34>& GetPadStates() { return padStates_; }
+    /// Returns a snapshot of the boost pad states, copied under guiMutex_.
+    /// The snapshot is safe to read from any thread without further locking.
+    /// Returning by value is intentional (P1/01): the previous reference-return
+    /// allowed cross-thread reads concurrent with ReadBoostPads writes.
+    static std::array<BoostPadState, 34> GetPadStates();
 };
 
 } 

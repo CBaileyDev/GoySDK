@@ -6,13 +6,15 @@
 
 #include <RLInference.hpp>
 #include <torch/torch.h>
+#include "miniz_tinfl.h"
 
-#include <random>
 #include <algorithm>
 #include <cstring>
-#include <vector>
+#include <limits>
+#include <random>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // ---- Minimal ZIP Central-Directory parser --------------------------------
 // TorchScript .lt files are ZIP archives.  Local headers have data-descriptor
@@ -20,47 +22,79 @@
 // Directory at the end of the file instead.
 namespace {
 
+bool HasRange(size_t total, size_t offset, size_t length) {
+    return offset <= total && length <= total - offset;
+}
+
+uint16_t ReadU16(const uint8_t* p) {
+    uint16_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+uint32_t ReadU32(const uint8_t* p) {
+    uint32_t v = 0;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 bool ExtractDataEntries(const void* zipData, size_t zipSize,
                         std::unordered_map<int, std::vector<uint8_t>>& out)
 {
     const uint8_t* base = static_cast<const uint8_t*>(zipData);
-    const uint8_t* end  = base + zipSize;
-    if (zipSize < 22) return false;
+
+    constexpr size_t kEocdMinSize = 22;
+    constexpr size_t kMaxZipComment = 0xFFFF;
+    constexpr size_t kMaxEocdSearch = kEocdMinSize + kMaxZipComment;
+    if (!base || zipSize < kEocdMinSize) return false;
 
     // 1) Find EOCD (signature 0x06054B50) by scanning backwards.
-    const uint8_t* eocd = nullptr;
-    for (const uint8_t* s = end - 22; s >= base; --s) {
-        uint32_t sig;
-        std::memcpy(&sig, s, 4);
-        if (sig == 0x06054B50) { eocd = s; break; }
-    }
-    if (!eocd) return false;
+    const size_t searchStart = zipSize - kEocdMinSize;
+    const size_t searchFloor =
+        (zipSize > kMaxEocdSearch) ? (zipSize - kMaxEocdSearch) : 0;
 
-    uint16_t numEntries;
-    uint32_t cdOffset;
-    std::memcpy(&numEntries, eocd + 10, 2);
-    std::memcpy(&cdOffset,   eocd + 16, 4);
-    if (cdOffset >= zipSize) return false;
+    size_t eocdOffset = static_cast<size_t>(-1);
+    for (size_t off = searchStart;; --off) {
+        if (ReadU32(base + off) == 0x06054B50) {
+            eocdOffset = off;
+            break;
+        }
+        if (off == searchFloor) break;
+    }
+    if (eocdOffset == static_cast<size_t>(-1)) return false;
+
+    const uint8_t* eocd = base + eocdOffset;
+    const uint16_t numEntries = ReadU16(eocd + 10);
+    const size_t cdSize = static_cast<size_t>(ReadU32(eocd + 12));
+    const size_t cdStart = static_cast<size_t>(ReadU32(eocd + 16));
+    if (numEntries == 0 || cdSize == 0) return false;
+    if (!HasRange(zipSize, cdStart, cdSize)) return false;
 
     // 2) Walk Central Directory entries (sig 0x02014B50).
-    const uint8_t* cd = base + cdOffset;
-    for (int e = 0; e < numEntries && cd + 46 <= end; ++e) {
-        uint32_t cdSig;
-        std::memcpy(&cdSig, cd, 4);
-        if (cdSig != 0x02014B50) break;
+    size_t cdOff = cdStart;
+    const size_t cdEnd = cdStart + cdSize;
+    for (uint16_t e = 0; e < numEntries; ++e) {
+        if (cdOff > cdEnd || !HasRange(cdEnd, cdOff, 46)) return false;
 
-        uint16_t compression, fnLen, extraLen, commentLen;
-        uint32_t compSize, uncompSize, localOffset;
-        std::memcpy(&compression, cd + 10, 2);
-        std::memcpy(&compSize,    cd + 20, 4);
-        std::memcpy(&uncompSize,  cd + 24, 4);
-        std::memcpy(&fnLen,       cd + 28, 2);
-        std::memcpy(&extraLen,    cd + 30, 2);
-        std::memcpy(&commentLen,  cd + 32, 2);
-        std::memcpy(&localOffset, cd + 42, 4);
+        const uint8_t* cd = base + cdOff;
+        if (ReadU32(cd) != 0x02014B50) return false;
 
-        std::string name(reinterpret_cast<const char*>(cd + 46), fnLen);
-        cd += 46 + fnLen + extraLen + commentLen;   // advance to next CD entry
+        const uint16_t compression = ReadU16(cd + 10);
+        const uint32_t compSize32 = ReadU32(cd + 20);
+        const uint32_t uncompSize32 = ReadU32(cd + 24);
+        const uint16_t fnLen = ReadU16(cd + 28);
+        const uint16_t extraLen = ReadU16(cd + 30);
+        const uint16_t commentLen = ReadU16(cd + 32);
+        const uint32_t localOffset32 = ReadU32(cd + 42);
+
+        const size_t nameOffset = cdOff + 46;
+        const size_t variableLen = static_cast<size_t>(fnLen) +
+                                   static_cast<size_t>(extraLen) +
+                                   static_cast<size_t>(commentLen);
+        if (!HasRange(cdEnd, nameOffset, variableLen)) return false;
+
+        std::string name(reinterpret_cast<const char*>(base + nameOffset), fnLen);
+        cdOff = nameOffset + variableLen;
 
         // We only care about "archive/data/<number>"
         if (name.size() <= 13 || name.compare(0, 13, "archive/data/") != 0)
@@ -70,25 +104,54 @@ bool ExtractDataEntries(const void* zipData, size_t zipSize,
         for (char c : numStr) if (c < '0' || c > '9') { isNum = false; break; }
         if (!isNum) continue;
 
-        int idx = std::stoi(numStr);
+        int idx = -1;
+        try {
+            const unsigned long parsed = std::stoul(numStr);
+            if (parsed > static_cast<unsigned long>(std::numeric_limits<int>::max()))
+                return false;
+            idx = static_cast<int>(parsed);
+        } catch (...) {
+            return false;
+        }
 
         // Jump to the local file header to find the actual data bytes.
-        if (localOffset + 30 > zipSize) continue;
+        const size_t localOffset = static_cast<size_t>(localOffset32);
+        if (!HasRange(zipSize, localOffset, 30)) return false;
         const uint8_t* local = base + localOffset;
-        uint32_t localSig;
-        std::memcpy(&localSig, local, 4);
-        if (localSig != 0x04034B50) continue;
+        if (ReadU32(local) != 0x04034B50) return false;
 
-        uint16_t localFnLen, localExLen;
-        std::memcpy(&localFnLen, local + 26, 2);
-        std::memcpy(&localExLen, local + 28, 2);
-        const uint8_t* rawData = local + 30 + localFnLen + localExLen;
+        const uint16_t localFnLen = ReadU16(local + 26);
+        const uint16_t localExLen = ReadU16(local + 28);
+        const size_t localDataStart = localOffset + 30;
+        const size_t localVariableLen =
+            static_cast<size_t>(localFnLen) + static_cast<size_t>(localExLen);
+        if (!HasRange(zipSize, localDataStart, localVariableLen)) return false;
 
         // Use the size from the Central Directory (always correct).
-        if (rawData + compSize > end) continue;
-        if (compression != 0) continue;   // only STORED
+        const size_t rawOffset = localDataStart + localVariableLen;
+        const size_t compSize = static_cast<size_t>(compSize32);
+        const size_t uncompSize = static_cast<size_t>(uncompSize32);
+        if (!HasRange(zipSize, rawOffset, compSize)) return false;
+        const uint8_t* rawData = base + rawOffset;
 
-        out[idx].assign(rawData, rawData + compSize);
+        std::vector<uint8_t> bytes;
+        if (compression == 0) {
+            if (compSize != uncompSize) return false;
+            bytes.assign(rawData, rawData + compSize);
+        } else if (compression == 8) {
+            if (uncompSize > bytes.max_size()) return false;
+            bytes.resize(uncompSize);
+            const size_t outBytes = tinfl_decompress_mem_to_mem(
+                bytes.data(), bytes.size(), rawData, compSize, 0);
+            if (outBytes == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED ||
+                outBytes != uncompSize) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        out[idx] = std::move(bytes);
     }
     return !out.empty();
 }
@@ -98,31 +161,8 @@ bool ExtractDataEntries(const void* zipData, size_t zipSize,
 // ---- RLInference ---------------------------------------------------------
 namespace RLInference {
 
-// Discrete action table (mirrors GoySDK::ActionMask.hpp exactly).
-static const std::vector<ActionOutput>& GetDiscreteActions() {
-    static const auto actions = [] {
-        std::vector<ActionOutput> built;
-        constexpr float B[] = {0.f, 1.f};
-        constexpr float T[] = {-1.f, 0.f, 1.f};
-
-        // Ground actions
-        for (float th : T) for (float st : T) for (float bo : B) for (float hb : B) {
-            if (bo == 1.f && th != 1.f) continue;
-            built.push_back({th, st, 0.f, st, 0.f, false, bo==1.f, hb==1.f});
-        }
-        // Air actions
-        for (float pi : T) for (float ya : T) for (float ro : T)
-          for (float ju : B) for (float bo : B) {
-            if (ju == 1.f && ya != 0.f) continue;
-            if (pi == ro && ro == ju && ju == 0.f) continue;
-            bool jb = ju==1.f, bb = bo==1.f;
-            bool hb = jb && (pi!=0.f || ya!=0.f || ro!=0.f);
-            built.push_back({bo, ya, pi, ya, ro, jb, bb, hb});
-        }
-        return built;
-    }();
-    return actions;
-}
+// The discrete action table is host-owned and injected via BotConfig::discrete_actions.
+// See P0/06: keeping a second copy here would silently desync from GoySDK::ActionMask.hpp.
 
 // ------ Impl: holds MLP weights and runs inference -----------------------
 struct Bot::Impl {
@@ -239,11 +279,20 @@ Bot::Bot(const BotConfig& cfg, void* /*reserved*/)
 Bot::~Bot() = default;
 
 bool Bot::is_initialized() const {
-    // Always return true — even if model loading failed we still work (stub).
-    return impl_ != nullptr;
+    // True only after model weights load successfully. Constructed-but-stub
+    // bots must report false so callers can surface load failures.
+    return impl_ != nullptr && impl_->ready;
 }
 
 bool Bot::forward() {
+    return forward_impl(nullptr);
+}
+
+bool Bot::forward(const std::vector<uint8_t>& actionMask) {
+    return forward_impl(&actionMask);
+}
+
+bool Bot::forward_impl(const std::vector<uint8_t>* actionMask) {
     if (!impl_ || obs_.empty()) return false;
 
     // ---- Stub mode: model didn't load → neutral output ------------------
@@ -259,7 +308,8 @@ bool Bot::forward() {
     try {
         torch::NoGradGuard ng;
         auto inp = torch::from_blob(
-            obs_.data(), {1, (int64_t)obs_.size()}, torch::kFloat32).clone();
+            obs_.data(), {1, static_cast<int64_t>(obs_.size())},
+            torch::kFloat32).clone();
 
         auto h = impl_->RunMLP(inp, impl_->shared);
         // Activation between shared head output and policy head input
@@ -267,25 +317,69 @@ bool Bot::forward() {
         auto logits = impl_->RunMLP(h, impl_->policy);
 
         auto flat = logits.squeeze().contiguous();
-        int nAct  = static_cast<int>(flat.numel());
+        const int nAct = static_cast<int>(flat.numel());
+
+        // Validate the host-injected discrete-action table dimension first.
+        // A model/table mismatch is a configuration bug and must be visible.
+        const auto& acts = config_.discrete_actions;
+        if (static_cast<int>(acts.size()) != nAct) {
+            last_output_ = {};
+            last_debug_.available = false;
+            last_debug_.action_index = -1;
+            last_debug_.logits.clear();
+            return false;
+        }
+
+        // Then validate the mask shape against the policy output dim.
+        if (actionMask && static_cast<int>(actionMask->size()) != nAct) {
+            last_output_ = {};
+            last_debug_.available = false;
+            last_debug_.action_index = -1;
+            last_debug_.logits.clear();
+            return false;
+        }
+
+        // Apply the mask BEFORE argmax/sampling so we sample from the
+        // softmax-over-allowed-actions distribution the policy was trained on.
+        if (actionMask) {
+            auto* logitsData = flat.data_ptr<float>();
+            bool anyAllowed = false;
+            for (int i = 0; i < nAct; ++i) {
+                if ((*actionMask)[static_cast<size_t>(i)] == 0) {
+                    logitsData[i] = -std::numeric_limits<float>::infinity();
+                } else {
+                    anyAllowed = true;
+                }
+            }
+            if (!anyAllowed) {
+                last_output_ = {};
+                last_debug_.available = false;
+                last_debug_.action_index = -1;
+                last_debug_.logits.clear();
+                return false;
+            }
+        }
 
         last_debug_.available = true;
         last_debug_.logits.resize(nAct);
         std::memcpy(last_debug_.logits.data(), flat.data_ptr<float>(),
-                    nAct * sizeof(float));
+                    static_cast<size_t>(nAct) * sizeof(float));
 
-        int ai = config_.deterministic
+        const int ai = config_.deterministic
             ? static_cast<int>(flat.argmax().item<int64_t>())
             : impl_->Sample(flat);
         last_debug_.action_index = ai;
 
-        const auto& acts = GetDiscreteActions();
-        last_output_ = (ai >= 0 && ai < (int)acts.size()) ? acts[ai] : ActionOutput{};
+        last_output_ = (ai >= 0 && ai < static_cast<int>(acts.size()))
+            ? acts[static_cast<size_t>(ai)]
+            : ActionOutput{};
         return true;
     } catch (...) {
         // On any error during inference, return neutral.
         last_output_ = {};
         last_debug_.available = false;
+        last_debug_.action_index = -1;
+        last_debug_.logits.clear();
         return true;
     }
 }
